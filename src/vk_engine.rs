@@ -504,6 +504,30 @@ impl VulkanEngine {
         }
     }
 
+    /// Helper utility to allocate a descriptor set and link it to an image view.
+    fn allocate_and_write_descriptor_set(&self, image_view: vk::ImageView) -> vk::DescriptorSet {
+        unsafe {
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(self.descriptor_pool)
+                .set_layouts(std::slice::from_ref(&self.descriptor_set_layout));
+            let descriptor_set = self.device.allocate_descriptor_sets(&alloc_info).unwrap()[0];
+
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(image_view)
+                .sampler(self.texture_sampler);
+
+            let descriptor_write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info));
+
+            self.device.update_descriptor_sets(&[descriptor_write], &[]);
+            descriptor_set
+        }
+    }
+
     /// Helper utility to find hardware supported host memory type pools dynamically
     fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> u32 {
         let mem_properties = unsafe {
@@ -1057,23 +1081,7 @@ impl VulkanEngine {
                         layer_count: 1,
                     });
                 let new_view = self.device.create_image_view(&view_info, None).unwrap();
-
-                let alloc_info = vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(self.descriptor_pool)
-                    .set_layouts(std::slice::from_ref(&self.descriptor_set_layout));
-                let new_descriptor_set =
-                    self.device.allocate_descriptor_sets(&alloc_info).unwrap()[0];
-
-                let image_info = vk::DescriptorImageInfo::default()
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image_view(new_view)
-                    .sampler(self.texture_sampler);
-                let descriptor_write = vk::WriteDescriptorSet::default()
-                    .dst_set(new_descriptor_set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(&image_info));
-                self.device.update_descriptor_sets(&[descriptor_write], &[]);
+                let new_descriptor_set = self.allocate_and_write_descriptor_set(new_view);
 
                 textures.insert(
                     window_id,
@@ -1361,25 +1369,8 @@ impl VulkanEngine {
                     layer_count: 1,
                 });
             let imported_view = self.device.create_image_view(&view_info, None).unwrap();
-
             // Dynamically allocate a separate descriptor set for this window:
-            let alloc_info = vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.descriptor_pool)
-                .set_layouts(std::slice::from_ref(&self.descriptor_set_layout));
-            let new_descriptor_set = self.device.allocate_descriptor_sets(&alloc_info).unwrap()[0];
-
-            let image_info = vk::DescriptorImageInfo::default()
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image_view(imported_view)
-                .sampler(self.texture_sampler);
-
-            let descriptor_write = vk::WriteDescriptorSet::default()
-                .dst_set(new_descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(std::slice::from_ref(&image_info));
-
-            self.device.update_descriptor_sets(&[descriptor_write], &[]);
+            let new_descriptor_set = self.allocate_and_write_descriptor_set(imported_view);
 
             // Cache the newly allocated window structure metrics
             textures.insert(
