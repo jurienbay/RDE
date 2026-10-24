@@ -221,20 +221,7 @@ impl VulkanEngine {
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain).unwrap() };
         let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
             .iter()
-            .map(|&image| {
-                let view_info = vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::B8G8R8A8_UNORM)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-                unsafe { device.create_image_view(&view_info, None).unwrap() }
-            })
+            .map(|&image| create_default_2d_image_view(&device, image, vk::Format::B8G8R8A8_UNORM))
             .collect();
 
         // Define descriptor binding for a single Fragment Shader Combined Image Sampler
@@ -1062,18 +1049,7 @@ impl VulkanEngine {
                 let new_memory = self.device.allocate_memory(&img_alloc_info, None).unwrap();
                 self.device.bind_image_memory(new_image, new_memory, 0).unwrap();
 
-                let view_info = vk::ImageViewCreateInfo::default()
-                    .image(new_image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::B8G8R8A8_UNORM)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-                let new_view = self.device.create_image_view(&view_info, None).unwrap();
+                let new_view = create_default_2d_image_view(&self.device, new_image, vk::Format::B8G8R8A8_UNORM);
                 let new_descriptor_set = self.allocate_and_write_descriptor_set(new_view);
 
                 textures.insert(
@@ -1125,13 +1101,7 @@ impl VulkanEngine {
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(target.image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
+                    .subresource_range(default_color_subresource_range())
                     //.src_access_mask(vk::AccessFlags::empty())
                     .src_access_mask(if texture_needs_recreation {
                         vk::AccessFlags::empty()
@@ -1181,13 +1151,7 @@ impl VulkanEngine {
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(target.image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
+                    .subresource_range(default_color_subresource_range())
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);
 
@@ -1319,13 +1283,7 @@ impl VulkanEngine {
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(imported_image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
+                    .subresource_range(default_color_subresource_range())
                     .src_access_mask(vk::AccessFlags::empty())
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);
 
@@ -1341,27 +1299,7 @@ impl VulkanEngine {
             });
 
             let vulkan_format = map_drm_fourcc_to_vulkan(fourcc);
-
-            // Create classic ImageView wrapper
-            let view_info = vk::ImageViewCreateInfo::default()
-                .image(imported_image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                //.format(vk::Format::B8G8R8A8_UNORM)
-                .format(vulkan_format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::R, // Ensure these route cleanly based
-                    g: vk::ComponentSwizzle::G, // on how the specific fragment shader
-                    b: vk::ComponentSwizzle::B, // compiles your sampler vec4 textures.
-                    a: vk::ComponentSwizzle::A,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-            let imported_view = self.device.create_image_view(&view_info, None).unwrap();
+            let imported_view = create_default_2d_image_view(&self.device, imported_image, vulkan_format);
             // Dynamically allocate a separate descriptor set for this window:
             let new_descriptor_set = self.allocate_and_write_descriptor_set(imported_view);
 
@@ -1381,6 +1319,26 @@ impl VulkanEngine {
                 },
             );
         }
+    }
+}
+
+/// Helper utility to instantiate a standard 2D Color Image View wrapper.
+fn create_default_2d_image_view(device: &Device, image: vk::Image, format: vk::Format) -> vk::ImageView {
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(default_color_subresource_range());
+    unsafe { device.create_image_view(&view_info, None).unwrap() }
+}
+
+const fn default_color_subresource_range() -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
     }
 }
 
