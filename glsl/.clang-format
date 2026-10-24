@@ -1,0 +1,42 @@
+---
+BasedOnStyle: LLVM
+Language: Cpp
+
+# Indentation & Spacing (Tab Optimized)
+UseTab: Always
+TabWidth: 4
+IndentWidth: 4
+ColumnLimit: 120   # Increased slightly to prevent pushing layout variables downwards
+
+# Braces Configuration (Explicitly forces variables to attach to the closing brace)
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterObjCDeclaration: false
+  AfterStruct: false       # Crucial: Prevents a newline before the struct variable
+  AfterUnion: false
+  BeforeCatch: false
+  BeforeElse: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+
+# GLSL Blocks & Layout Controls
+AllowShortBlocksOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: All
+AlignAfterOpenBracket: Align
+AlwaysBreakAfterReturnType: None
+
+# Clean layout blocks
+SpacesInSquareBrackets: false
+SpaceBeforeParens: ControlStatements
+
+# Heavy structural alignment penalties to stop breaking before the variable name
+PenaltyBreakBeforeFirstCallParameter: 500
+PenaltyBreakComment: 500
+PenaltyBreakAssignment: 500
+---

@@ -1,0 +1,26 @@
+[package]
+name = "RDE"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smithay = { version = "0.7", features = ["backend_winit", "wayland_frontend"] }
+wayland-server = "0.31"
+#calloop = "0.12"
+raw-window-handle = "0.6"
+xkbcommon = "0.7"
+ash = "0.38"
+ash-window = "0.13.0"
+drm-fourcc = "2.2"
+secrecy = "0.10.3"
+pwcheck = "0.2.1"
+
+[build-dependencies]
+# Compiles GLSL to SPIR-V at build time
+shaderc = "0.10.1"
+
+[package.metadata.rpm.cargo-generate-rpm]
+assets = [
+    { source = "target/release/rde", path = "/usr/bin/rde", mode = "755" },
+    { source = "LICENSE", path = "/usr/share/licenses/rde/LICENSE", mode = "644" }
+]
