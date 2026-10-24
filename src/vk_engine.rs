@@ -515,6 +515,40 @@ impl VulkanEngine {
         }
     }
 
+    /// Submits a recorded command buffer to the graphics queue and presents the target swapchain image index.
+    fn submit_and_present_frame(&self, cmd_buf: vk::CommandBuffer, image_index: u32) {
+        unsafe {
+            let wait_semaphores = [self.image_available_semaphore];
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let signal_semaphores = [self.render_finished_semaphore];
+
+            let submit_info = vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(std::slice::from_ref(&cmd_buf))
+                .signal_semaphores(&signal_semaphores);
+
+            self.device
+                .queue_submit(
+                    self.graphics_queue,
+                    std::slice::from_ref(&submit_info),
+                    self.in_flight_fence,
+                )
+                .unwrap();
+
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(std::slice::from_ref(&self.swapchain))
+                .image_indices(std::slice::from_ref(&image_index));
+
+            let present_result = self.swapchain_loader.queue_present(self.graphics_queue, &present_info);
+            match present_result {
+                Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {}
+                Err(e) => panic!("Fatal presentation lane submission failure: {:?}", e),
+            }
+        }
+    }
+
     /// Helper utility to find hardware supported host memory type pools dynamically
     fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> u32 {
         let mem_properties = unsafe {
@@ -671,34 +705,7 @@ impl VulkanEngine {
                 self.device.end_command_buffer(cmd_buf).unwrap();
 
                 // Submit primitives directly down the hardware queues
-                let wait_semaphores = [self.image_available_semaphore];
-                let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-                let signal_semaphores = [self.render_finished_semaphore];
-
-                let submit_info = vk::SubmitInfo::default()
-                    .wait_semaphores(&wait_semaphores)
-                    .wait_dst_stage_mask(&wait_stages)
-                    .command_buffers(std::slice::from_ref(&cmd_buf))
-                    .signal_semaphores(&signal_semaphores);
-
-                self.device
-                    .queue_submit(
-                        self.graphics_queue,
-                        std::slice::from_ref(&submit_info),
-                        self.in_flight_fence,
-                    )
-                    .unwrap();
-
-                let present_info = vk::PresentInfoKHR::default()
-                    .wait_semaphores(&signal_semaphores)
-                    .swapchains(std::slice::from_ref(&self.swapchain))
-                    .image_indices(std::slice::from_ref(&image_index));
-
-                let present_result = self.swapchain_loader.queue_present(self.graphics_queue, &present_info);
-                match present_result {
-                    Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {}
-                    Err(e) => panic!("Fatal presentation lane failure during lock screen: {:?}", e),
-                }
+                self.submit_and_present_frame(cmd_buf, image_index);
                 return; // Ensure background windows aren't drawn!
             }
 
@@ -862,39 +869,7 @@ impl VulkanEngine {
 
             self.device.cmd_end_render_pass(cmd_buf);
             self.device.end_command_buffer(cmd_buf).unwrap();
-
-            // Submission Cycle Pipeline Configuration
-            let wait_semaphores = [self.image_available_semaphore];
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let signal_semaphores = [self.render_finished_semaphore];
-
-            let submit_info = vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
-                .command_buffers(std::slice::from_ref(&cmd_buf))
-                .signal_semaphores(&signal_semaphores);
-
-            self.device
-                .queue_submit(
-                    self.graphics_queue,
-                    std::slice::from_ref(&submit_info),
-                    self.in_flight_fence,
-                )
-                .unwrap(); // XXX ghostty(1) will crash here??
-
-            // Queue Presentation Frame mapping
-            let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(std::slice::from_ref(&self.swapchain))
-                .image_indices(std::slice::from_ref(&image_index));
-
-            let present_result = self.swapchain_loader.queue_present(self.graphics_queue, &present_info);
-            match present_result {
-                Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    // Frame completed or window sizing flags require a skip step
-                }
-                Err(e) => panic!("Fatal presentation lane failure: {:?}", e),
-            }
+            self.submit_and_present_frame(cmd_buf, image_index);
         }
     }
 
