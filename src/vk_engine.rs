@@ -588,6 +588,10 @@ impl VulkanEngine {
                 .wait_for_fences(std::slice::from_ref(&self.in_flight_fence), true, u64::MAX)
                 .unwrap();
 
+            // Extract dimensions for the entire frame loop
+            let screen_w = self.swapchain_extent.width as f32;
+            let screen_h = self.swapchain_extent.height as f32;
+
             // Safely handle OUT_OF_DATE errors when acquiring the next swapchain image slot
             let acquire_result = self.swapchain_loader.acquire_next_image(
                 self.swapchain,
@@ -637,9 +641,6 @@ impl VulkanEngine {
                 // ----------------===========================================
                 // CDE Lock screen draw pass
                 // ----------------===========================================
-                let screen_w = self.swapchain_extent.width as f32;
-                let screen_h = self.swapchain_extent.height as f32;
-
                 // Calculate Exact Orthographic Coordinates to Center the Lock Box
                 let box_w = crate::CDE_LOCK_WIDTH;
                 let box_h = crate::CDE_LOCK_HEIGHT;
@@ -739,9 +740,7 @@ impl VulkanEngine {
 
                 if window.is_minimized {
                     // Build the projection layout translation matrix factoring floating window offsets!
-                    let w = self.swapchain_extent.width as f32;
-                    let h = self.swapchain_extent.height as f32;
-                    let workspace_ortho_matrix = find_pass_ortho_matrix(h, w, window.x, window.y);
+                    let workspace_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, window.x, window.y);
 
                     // Empty title buffer block with Width, Height matching CDE_ICON dimensions
                     let workspace_push_constants = CdePushConstants::new_ui_element(
@@ -777,9 +776,7 @@ impl VulkanEngine {
                                 //let fallback_frame_set = self.descriptor_sets[0];
 
                                 // Build the projection layout translation matrix factoring floating window offsets!
-                                let w = self.swapchain_extent.width as f32;
-                                let h = self.swapchain_extent.height as f32;
-                                let pass1_ortho_matrix = find_pass_ortho_matrix(h, w, window.x, window.y);
+                                let pass1_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, window.x, window.y);
                                 let title_chars = {
                                     let mut tmp = [0u32; 16];
                                     let len = title_buffer.len().min(16);
@@ -818,7 +815,7 @@ impl VulkanEngine {
                                 let client_w = window.width - (CDE_BORDER_WIDTH * 2.0);
                                 let client_h = window.height - (CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT);
                                 // Calculate projection mapping aligned exactly with inner client viewport offsets
-                                let pass2_ortho_matrix = find_pass_ortho_matrix(h, w, client_x, client_y);
+                                let pass2_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, client_x, client_y);
 
                                 let pass2_push_constants = CdePushConstants {
                                     mvp: pass2_ortho_matrix,
@@ -844,9 +841,6 @@ impl VulkanEngine {
 
             // Render CDE front panel desktop dock
             {
-                // Calculate bottom center positioning matching the current monitor resolution
-                let screen_w = self.swapchain_extent.width as f32;
-                let screen_h = self.swapchain_extent.height as f32;
                 // Calculate bottom center positioning matching the current monitor resolution
                 let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
                 let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0; // Anchored 10 pixels above the absolute screen bottom
