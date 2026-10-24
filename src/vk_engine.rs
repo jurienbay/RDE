@@ -734,14 +734,8 @@ impl VulkanEngine {
 
                 // Extract Application Name and convert to an integer array buffer
                 let surface = window.toplevel.wl_surface();
-                let title_str = smithay::wayland::compositor::with_states(surface, |states| {
-                    states
-                        .data_map
-                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                        .and_then(|data| data.lock().unwrap().title.clone())
-                }).unwrap_or_else(|| "Application".to_string());
-                let title_buffer: Vec<u32> = title_str.chars().map(|ch| ch as u32).collect();
-
+                let title_buffer: Vec<u32> = extract_surface_title(surface)
+                    .chars().map(|ch| ch as u32).collect();
 
                 if window.is_minimized {
                     // Build the projection layout translation matrix factoring floating window offsets!
@@ -1350,4 +1344,14 @@ fn map_drm_fourcc_to_vulkan(fourcc: drm_fourcc::DrmFourcc) -> vk::Format {
         drm_fourcc::DrmFourcc::Bgrx8888 => vk::Format::R8G8B8A8_UNORM, // Flipped to correct channels
         _ => vk::Format::B8G8R8A8_UNORM, // Default fallback
     }
+}
+
+fn extract_surface_title(surface: &wayland_server::protocol::wl_surface::WlSurface) -> String {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().unwrap().title.clone())
+    })
+    .unwrap_or_else(|| "Application".to_string())
 }
