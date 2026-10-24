@@ -6,6 +6,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::WinitGraphicsBackend;
 
+use std::sync::Arc;
 use std::os::fd::BorrowedFd;
 use std::os::linux::fs::MetadataExt;
 
@@ -14,6 +15,10 @@ use crate::constants::*;
 use crate::glsl::*;
 
 pub struct WindowTexture {
+    // Keep a shared reference to the device and descriptor pool for destruction
+    device: Arc<Device>,
+    descriptor_pool: vk::DescriptorPool,
+
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
     pub view: vk::ImageView,
@@ -23,10 +28,29 @@ pub struct WindowTexture {
     pub is_dmabuf: bool,
 }
 
+impl Drop for WindowTexture {
+    fn drop(&mut self) {
+        unsafe {
+            // Free the discrete descriptor set from the pool
+            let _ = self.device.free_descriptor_sets(
+                self.descriptor_pool,
+                &[self.descriptor_set]
+            );
+
+            // Destroy the physical texture primitives
+            self.device.destroy_image_view(self.view, None);
+            self.device.destroy_image(self.image, None);
+            self.device.free_memory(self.memory, None);
+
+            println!("DEBUG: WindowTexture for {}x{} successfully dropped via RAII.", self.width, self.height);
+        }
+    }
+}
+
 pub struct VulkanEngine {
     _entry: Entry,
     pub instance: Instance,
-    pub device: Device,
+    pub device: Arc<Device>,
     pub physical_device: vk::PhysicalDevice,
     pub queue_family_index: u32,
     pub graphics_queue: vk::Queue,
@@ -442,7 +466,7 @@ impl VulkanEngine {
         Self {
             _entry: entry,
             instance,
-            device,
+            device: std::sync::Arc::new(device),
             physical_device,
             queue_family_index,
             graphics_queue,
@@ -470,21 +494,6 @@ impl VulkanEngine {
             descriptor_set,
 
             window_textures: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    /// TODO - Make WindowTexture RAII and impl Drop?
-    fn destroy_window_texture(&self, texture: WindowTexture) {
-        unsafe {
-            // Free the discrete descriptor set from the pool manually
-            let _ = self.device.free_descriptor_sets(
-                self.descriptor_pool,
-                &[texture.descriptor_set]
-            );
-
-            self.device.destroy_image_view(texture.view, None);
-            self.device.destroy_image(texture.image, None);
-            self.device.free_memory(texture.memory, None);
         }
     }
 
@@ -998,9 +1007,7 @@ impl VulkanEngine {
             if texture_needs_recreation {
                 // Dimensions changed or texture is unallocated: Perform clean reallocation pass
                 self.device.queue_wait_idle(self.graphics_queue).unwrap();
-                if let Some(old) = textures.remove(&window_id) { // Destroy previous resources
-                    self.destroy_window_texture(old);
-                }
+                textures.remove(&window_id);
 
                 // Create new destination GPU Device-Local Image Texture
                 let image_info = vk::ImageCreateInfo::default()
@@ -1067,6 +1074,8 @@ impl VulkanEngine {
                 textures.insert(
                     window_id,
                     WindowTexture {
+                        device: self.device.clone(),
+                        descriptor_pool: self.descriptor_pool,
                         image: new_image,
                         memory: new_memory,
                         view: new_view,
@@ -1221,10 +1230,7 @@ impl VulkanEngine {
             self.device.queue_wait_idle(self.graphics_queue).unwrap();
 
             // Clean up old window texture resources if they exist
-            if let Some(old) = textures.remove(&window_id) {
-                // Freeing descriptor sets is handled automatically when resetting the descriptor pool
-                self.destroy_window_texture(old);
-            }
+            textures.remove(&window_id);
 
             // Tweak the Vulkan format dynamically based on what the client allocated
             let vulkan_format = match fourcc {
@@ -1387,6 +1393,8 @@ impl VulkanEngine {
             textures.insert(
                 window_id,
                 WindowTexture {
+                    device: self.device.clone(),
+                    descriptor_pool: self.descriptor_pool,
                     image: imported_image,
                     memory: imported_memory,
                     view: imported_view,
