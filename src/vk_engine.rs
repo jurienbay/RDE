@@ -1234,12 +1234,7 @@ impl VulkanEngine {
             textures.remove(&window_id);
 
             // Tweak the Vulkan format dynamically based on what the client allocated
-            let vulkan_format = match fourcc {
-                drm_fourcc::DrmFourcc::Argb8888 => vk::Format::B8G8R8A8_UNORM,
-                drm_fourcc::DrmFourcc::Xrgb8888 => vk::Format::B8G8R8A8_UNORM,
-                drm_fourcc::DrmFourcc::Bgrx8888 => vk::Format::R8G8B8A8_UNORM, // Flipped to correct channels
-                _ => vk::Format::B8G8R8A8_UNORM, // Fallback
-            };
+            let vulkan_format = map_drm_fourcc_to_vulkan(fourcc);
 
             // Structure the layout mapping for Plane 0 explicitly
             let plane_layout = vk::SubresourceLayout {
@@ -1344,11 +1339,7 @@ impl VulkanEngine {
                 );
             });
 
-            let vulkan_format = match fourcc {
-                drm_fourcc::DrmFourcc::Argb8888 => vk::Format::B8G8R8A8_UNORM,
-                drm_fourcc::DrmFourcc::Xrgb8888 => vk::Format::B8G8R8A8_UNORM,
-                _ => vk::Format::B8G8R8A8_UNORM,
-            };
+            let vulkan_format = map_drm_fourcc_to_vulkan(fourcc);
 
             // Create classic ImageView wrapper
             let view_info = vk::ImageViewCreateInfo::default()
@@ -1406,5 +1397,15 @@ impl VulkanEngine {
                 },
             );
         }
+    }
+}
+
+fn map_drm_fourcc_to_vulkan(fourcc: drm_fourcc::DrmFourcc) -> vk::Format {
+    match fourcc {
+        drm_fourcc::DrmFourcc::Argb8888 | drm_fourcc::DrmFourcc::Xrgb8888 => {
+            vk::Format::B8G8R8A8_UNORM
+        }
+        drm_fourcc::DrmFourcc::Bgrx8888 => vk::Format::R8G8B8A8_UNORM, // Flipped to correct channels
+        _ => vk::Format::B8G8R8A8_UNORM, // Default fallback
     }
 }
