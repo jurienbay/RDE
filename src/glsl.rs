@@ -11,3 +11,16 @@ pub struct CdePushConstants {
     pub is_pressed: u32,        // 0 = Idle, 1 = Close Pressed, 2 = Minimize Pressed, 3 = Menu Pressed
     pub title_chars: [u32; 16], // Stores up to 16 ASCII character tokens for the app name.
 }
+
+impl CdePushConstants {
+    pub fn new_ui_element(mvp: [f32; 16], size: [f32; 2], state_flag: u32) -> Self {
+        Self {
+            mvp,
+            element_size: size,
+            is_focused: state_flag,
+            is_dragging: 0,
+            is_pressed: 0,
+            title_chars: [0u32; 16],
+        }
+    }
+}

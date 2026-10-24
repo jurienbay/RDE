@@ -762,14 +762,12 @@ impl VulkanEngine {
                     let h = self.swapchain_extent.height as f32;
                     let workspace_ortho_matrix = find_pass_ortho_matrix(h, w, window.x, window.y);
 
-                    let workspace_push_constants = CdePushConstants {
-                        mvp: workspace_ortho_matrix,
-                        element_size: [CDE_ICON_WIDTH, CDE_ICON_HEIGHT], // Width, Height matching CDE_ICON dimensions
-                        is_focused: 0u32,
-                        is_dragging: 0u32,
-                        is_pressed: 0u32,
-                        title_chars: [0u32; 16], // Empty title buffer block
-                    };
+                    // Empty title buffer block with Width, Height matching CDE_ICON dimensions
+                    let workspace_push_constants = CdePushConstants::new_ui_element(
+                        workspace_ortho_matrix,
+                        [CDE_ICON_WIDTH, CDE_ICON_HEIGHT],
+                        0u32
+                    );
                     // Render a blocky, compact 64x64 gray chiseled frame box directly onto the workspace desktop
                     // passing focus token state `0` to signal a traditional bevel element frame block
                     self.draw_element(
@@ -875,16 +873,11 @@ impl VulkanEngine {
                 // We encode the workspace selection into the higher bits of our integer flag!
                 // is_focused = 2 tells the shader it's the panel.
                 // Adding (active_workspace << 4) bundles the chosen desk index cleanly without extra push constant slots!
-                let panel_flag = 2u32 | (active_workspace << 4);
-
-                let panel_push_constants = CdePushConstants {
-                    mvp: panel_ortho_matrix,
-                    element_size: [CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT],
-                    is_focused: panel_flag, // Encodes (2 | active_workspace << 4)
-                    is_dragging: 0u32,
-                    is_pressed: 0u32,
-                    title_chars: [0u32; 16],
-                };
+                let panel_push_constants = CdePushConstants::new_ui_element(
+                    panel_ortho_matrix,
+                    [CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT],
+                    2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
+                );
 
                 // We pass `self.descriptor_set` (unmapped fallback set) to signal Pass 1 rendering.
                 // We pass `2` for the `is_focused` parameter. This special flag tells our fragment
