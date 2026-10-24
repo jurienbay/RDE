@@ -28,6 +28,13 @@ pub struct WindowTexture {
     pub is_dmabuf: bool,
 }
 
+impl WindowTexture {
+    /// Checks if an existing texture matches the requested specifications.
+    pub fn matches_specs(&self, width: u32, height: u32, is_dmabuf: bool) -> bool {
+        self.width == width && self.height == height && self.is_dmabuf == is_dmabuf
+    }
+}
+
 impl Drop for WindowTexture {
     fn drop(&mut self) {
         unsafe {
@@ -996,13 +1003,10 @@ impl VulkanEngine {
             self.device.unmap_memory(staging_memory);
 
             let mut textures = self.window_textures.lock().unwrap();
-            let mut texture_needs_recreation = true;
+            let texture_needs_recreation = textures
+                .get(&window_id)
+                .map_or(true, |tex| !tex.matches_specs(width, height, false));
 
-            if let Some(tex) = textures.get(&window_id) { // XXX(dedup 1)
-                if tex.width == width && tex.height == height && !tex.is_dmabuf {
-                    texture_needs_recreation = false;
-                }
-            }
 
             if texture_needs_recreation {
                 // Dimensions changed or texture is unallocated: Perform clean reallocation pass
@@ -1216,14 +1220,11 @@ impl VulkanEngine {
     ) {
         unsafe {
             let mut textures = self.window_textures.lock().unwrap();
-
             // Check if this window already has an identical texture allocated to avoid overhead
-            if let Some(tex) = textures.get(&window_id) { // XXX(dedup 1)
-                if tex.width == width && tex.height == height && tex.is_dmabuf {
-                    // Reusing hardware dmabuf handles across frames is managed transparently
-                    // by the kernel plane layer driver! We can skip allocation entirely.
-                    return;
-                }
+            // Reusing hardware dmabuf handles across frames is managed transparently
+            // by the kernel plane layer driver! We can skip allocation entirely.
+            if textures.get(&window_id).map_or(false, |tex| tex.matches_specs(width, height, true)) {
+                return;
             }
 
             // If dimensions changed or it's a new window, perform a localized clean allocation pass
