@@ -14,12 +14,14 @@ pub struct CdePushConstants {
 
 impl CdePushConstants {
     pub fn new_ui_element(mvp: [f32; 16], size: [f32; 2], state_flag: u32) -> Self {
+        let is_focused = state_flag & 0x0F; // TODO make into const and have encoding helper fn
+        let is_pressed = state_flag >> 4; // Upper bits to get the password_length.
         Self {
             mvp,
             element_size: size,
-            is_focused: state_flag,
+            is_focused,
             is_dragging: 0,
-            is_pressed: 0,
+            is_pressed,
             title_chars: [0u32; 16],
         }
     }

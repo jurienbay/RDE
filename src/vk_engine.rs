@@ -570,6 +570,22 @@ impl VulkanEngine {
             .expect("Failed to find suitable host visible memory type pointer configuration")
     }
 
+    /// Helper utility to render a flat or procedurally chiseled UI frame (Lock box, icons, panels).
+    fn draw_procedural_ui_element(
+        &self,
+        cmd_buf: vk::CommandBuffer,
+        screen_h: f32,
+        screen_w: f32,
+        rect: (f32, f32, f32, f32), // (x, y, width, height)
+        state_flag: u32,
+    ) {
+        let (x, y, w, h) = rect;
+        let ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, x, y);
+        let push_constants = CdePushConstants::new_ui_element(ortho_matrix, [w, h], state_flag);
+
+        self.draw_element(cmd_buf, self.descriptor_set, push_constants);
+    }
+
     pub fn draw_element(
         &self,
         cmd_buf: vk::CommandBuffer,
@@ -676,28 +692,14 @@ impl VulkanEngine {
                 // CDE Lock screen draw pass
                 // ----------------===========================================
                 // Calculate Exact Orthographic Coordinates to Center the Lock Box
-                let box_w = crate::CDE_LOCK_WIDTH;
-                let box_h = crate::CDE_LOCK_HEIGHT;
-                let box_x = (screen_w - box_w) / 2.0;
-                let box_y = (screen_h - box_h) / 2.0;
-                let lock_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, box_x, box_y);
-
-                // Configure Push Constants specifically for the Lock Dialog
-                // is_focused = 4 tells your fragment shader to render a CDE Lock Window container.
-                let lock_push_constants = CdePushConstants {
-                    mvp: lock_ortho_matrix,
-                    element_size: [box_w, box_h],
-                    is_focused: 4u32,
-                    is_dragging: 0u32,
-                    is_pressed: password_length, // // <-- CONVEY LENGTH VIA THIS PARAMETER FIELD.
-                    title_chars: [0u32; 16],     // Dialog text handles are rendered procedurally
-                };
-
-                // Draw the main dialog outer frame (procedural 3D chiseled box decoration)
-                self.draw_element(
+                let box_x = (screen_w - CDE_LOCK_WIDTH) / 2.0;
+                let box_y = (screen_h - CDE_LOCK_HEIGHT) / 2.0;
+                self.draw_procedural_ui_element(
                     cmd_buf,
-                    self.descriptor_set, // Fallback asset layout set descriptor
-                    lock_push_constants,
+                    screen_h,
+                    screen_w,
+                    (box_x, box_y, crate::CDE_LOCK_WIDTH, crate::CDE_LOCK_HEIGHT),
+                    4u32 | (password_length << 4),
                 );
 
                 // Close render pass execution pipelines
@@ -746,21 +748,13 @@ impl VulkanEngine {
                     .chars().map(|ch| ch as u32).collect();
 
                 if window.is_minimized {
-                    // Build the projection layout translation matrix factoring floating window offsets!
-                    let workspace_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, window.x, window.y);
-
-                    // Empty title buffer block with Width, Height matching CDE_ICON dimensions
-                    let workspace_push_constants = CdePushConstants::new_ui_element(
-                        workspace_ortho_matrix,
-                        [CDE_ICON_WIDTH, CDE_ICON_HEIGHT],
-                        0u32
-                    );
-                    // Render a blocky, compact 64x64 gray chiseled frame box directly onto the workspace desktop
-                    // passing focus token state `0` to signal a traditional bevel element frame block
-                    self.draw_element(
+                    // Render a blocky, compact 64x64 gray chiseled frame box directly onto the desktop layout
+                    self.draw_procedural_ui_element(
                         cmd_buf,
-                        self.descriptor_set, // Safe fallback decoration pass
-                        workspace_push_constants,
+                        screen_h,
+                        screen_w,
+                        (window.x, window.y, CDE_ICON_WIDTH, CDE_ICON_HEIGHT),
+                        0u32, // State token 0 signals a traditional flat bevel frame component
                     );
                     continue; // Bypasses live app texture overlay generation passes completely!
                 }
@@ -851,20 +845,17 @@ impl VulkanEngine {
                 // Calculate bottom center positioning matching the current monitor resolution
                 let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
                 let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0; // Anchored 10 pixels above the absolute screen bottom
-                let panel_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, panel_x, panel_y);
                 // We encode the workspace selection into the higher bits of our integer flag!
                 // is_focused = 2 tells the shader it's the panel.
                 // Adding (active_workspace << 4) bundles the chosen desk index cleanly without extra push constant slots!
-                let panel_push_constants = CdePushConstants::new_ui_element(
-                    panel_ortho_matrix,
-                    [CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT],
-                    2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
-                );
-
-                // We pass `self.descriptor_set` (unmapped fallback set) to signal Pass 1 rendering.
                 // We pass `2` for the `is_focused` parameter. This special flag tells our fragment
                 // shader: "This element is the Front Panel Dock—render interior button rows!"
-                self.draw_element(cmd_buf, self.descriptor_set, panel_push_constants);
+                self.draw_procedural_ui_element(
+                    cmd_buf,
+                    screen_h, screen_w,
+                    (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
+                    2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
+                );
             }
 
             self.device.cmd_end_render_pass(cmd_buf);
