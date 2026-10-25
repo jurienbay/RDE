@@ -748,10 +748,18 @@ void main() {
 					if (char_index < 16u) {
 						uint target_ascii = push.title_chars[char_index];
 						// If we hit a valid character stroke, print crisp text colors!
-						if (target_ascii != 0u && draw_cde_ascii_glyph(target_ascii, glyph_x, local_text_y)) {
+						if (target_ascii != 0u) {
+						    // Pass 1: Render the chiseled drop-shadow slightly offset to the bottom-right
+						    if (draw_cde_ascii_glyph(target_ascii, glyph_x - 1.0, local_text_y + 1.0)) {
+							outColor = (push.is_focused == 1u) ? CDE_HIGHLIGHT : vec4(0.85, 0.85, 0.85, 1.0); // Bright edge reflection
+							return;
+						    }
+						    // Pass 2: Render the primary font face ink over the shadow layer
+						    if (draw_cde_ascii_glyph(target_ascii, glyph_x, local_text_y)) {
 							// Focused active text is stark crisp white, unfocused text maps dark grey
 							outColor = (push.is_focused == 1u) ? vec4(1.0, 1.0, 1.0, 1.0) : vec4(0.30, 0.30, 0.30, 1.0);
 							return;
+						    }
 						}
 					}
 					// Underneath the letter glyphs, draw the clean solid slate focus bar color
