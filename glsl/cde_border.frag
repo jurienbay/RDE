@@ -131,6 +131,69 @@ bool draw_cde_ascii_glyph(uint ascii, float x, float y) {
         if (abs(ix - iy) == 0 && ix >= 1 && ix <= 3) return true;
         if (ix + iy == 5 && ix >= 1 && ix <= 3) return true;
     }
+    // Colon ':' (ASCII 58)
+    if (ascii == 58u) {
+        if (ix == 2 && (iy == 2 || iy == 4)) return true;
+    }
+    // Number '0' (ASCII 48)
+    if (ascii == 48u) {
+        if ((ix == 0 || ix == 4) && iy > 0 && iy < 6) return true;
+        if ((iy == 0 || iy == 6) && ix > 0 && ix < 4) return true;
+        if (ix == iy && ix >= 1 && ix <= 5) return true; // Diagonal cross slash line
+    }
+    // Number '1' (ASCII 49)
+    if (ascii == 49u) {
+        if (ix == 2) return true;
+        if (iy == 1 && ix == 1) return true;
+        if (iy == 6 && ix >= 1 && ix <= 3) return true;
+    }
+    // Number '2' (ASCII 50)
+    if (ascii == 50u) {
+        if (iy == 0 && ix > 0 && ix < 4) return true;
+        if (ix == 4 && iy > 0 && iy < 3) return true;
+        if (ix + iy == 6 && iy >= 3) return true;
+        if (iy == 6) return true;
+    }
+    // Number '3' (ASCII 51)
+    if (ascii == 51u) {
+        if (iy == 0 || iy == 3 || iy == 6) return true;
+        if (ix == 4) return true;
+    }
+    // Number '4' (ASCII 52)
+    if (ascii == 52u) {
+        if (ix == 4) return true;
+        if (iy == 3) return true;
+        if (ix == 0 && iy <= 3) return true;
+    }
+    // Number '5' (ASCII 53)
+    if (ascii == 53u) {
+        if (iy == 0 || iy == 3 || iy == 6) return true;
+        if (ix == 0 && iy <= 3) return true;
+        if (ix == 4 && iy >= 3) return true;
+    }
+    // Number '6' (ASCII 54)
+    if (ascii == 54u) {
+        if (ix == 0) return true;
+        if (iy == 0 || iy == 3 || iy == 6) return true;
+        if (ix == 4 && iy >= 3) return true;
+    }
+    // Number '7' (ASCII 55)
+    if (ascii == 55u) {
+        if (iy == 0) return true;
+        if (ix == 4) return true;
+    }
+    // Number '8' (ASCII 56)
+    if (ascii == 56u) {
+        if (ix == 0 || ix == 4) return true;
+        if (iy == 0 || iy == 3 || iy == 6) return true;
+    }
+    // Number '9' (ASCII 57)
+    if (ascii == 57u) {
+        if (ix == 4) return true;
+        if (iy == 0 || iy == 3 || iy == 6) return true;
+        if (ix == 0 && iy <= 3) return true;
+    }
+
     // Standard terminal underscore cursor fallback for any trailing indices
     if (ascii == 95u) {
         if (iy == 6) return true;
@@ -476,6 +539,45 @@ void main() {
 	    return;
 	}
 	////
+
+	/// XXX
+	// is_focused == 6 -> RENDER FRONT PANEL CLOCK TEXT
+	if (push.is_focused == 6u) {
+	    float x = inPixelPos.x;
+	    float y = inPixelPos.y;
+	    float w = push.element_size.x;
+	    float h = push.element_size.y;
+
+	    // Inverted Sunken Bevels (Shadow top/left, Highlight bottom/right)
+	    vec4 finalColor = CDE_FACE_COLOR;
+	    float eb = 1.5;
+	    if (x < eb || y < eb) {
+	        finalColor = CDE_SHADOW;
+	    } else if (x > (w - eb) || y > (h - eb)) {
+	        finalColor = CDE_HIGHLIGHT;
+	    }
+
+	    // Print the digital digits
+	    // Padding offsets to center the time string inside the sunken frame
+	    float text_local_x = x - 6.0;
+	    float text_local_y = y - 4.0;
+
+	    if (text_local_x >= 0.0 && text_local_y >= 0.0 && text_local_y < 7.0) {
+	        uint char_index = uint(floor(text_local_x / 6.0));
+	        float glyph_x = mod(text_local_x, 6.0);
+
+	        if (char_index < 16u) {
+	            uint target_ascii = push.title_chars[char_index];
+	            if (target_ascii != 0u && draw_cde_ascii_glyph(target_ascii, glyph_x, text_local_y)) {
+	                finalColor = CDE_ETCH_BLACK; // Solid digital ink text color
+	            }
+	        }
+	    }
+
+	    outColor = finalColor;
+	    return;
+	}
+	/// XXX
 
 	// Thin outer black etch line (Highest priority on extreme edges)
         if (x < 1.0 || y < 1.0 || x >= (w - 1.0) || y >= (h - 1.0)) {

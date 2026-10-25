@@ -887,6 +887,31 @@ impl VulkanEngine {
                     (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
                     2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
                 );
+
+                // Live FRONT PANEL Clock Text Overlay Pipeline
+                // Position the clock text lane on the left side of the Switcher matrix
+                let clock_w = 60.0;
+                let clock_h = 16.0;
+                let clock_x = panel_x + (CDE_PANEL_WIDTH / 2.0) - 130.0; // Pinned neatly to the left of the switcher
+                let clock_y = panel_y + ((CDE_PANEL_HEIGHT - clock_h) / 2.0);
+
+                let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
+                let mut clock_chars = [0u32; 16];
+                for (i, ch) in time_str.chars().take(16).enumerate() {
+                    clock_chars[i] = ch as u32;
+                }
+
+                let pass_matrix = find_pass_ortho_matrix(screen_h, screen_w, clock_x, clock_y);
+                let clock_push_constants = CdePushConstants {
+                    mvp: pass_matrix,
+                    element_size: [clock_w, clock_h],
+                    is_focused: 6u32, // Tell the frag shader to render a clock
+                    is_dragging: 0u32,
+                    is_pressed: 0u32,
+                    title_chars: clock_chars, // Feed character tokens straight to shader
+                };
+
+                self.draw_element(cmd_buf, self.descriptor_set, clock_push_constants);
             }
 
             // Render interactive CDE procedural dropdown menu
