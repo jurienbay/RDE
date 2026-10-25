@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::os::fd::BorrowedFd;
 use std::os::linux::fs::MetadataExt;
 
+use crate::ActiveMenu;
 use crate::WindowContext;
 use crate::constants::*;
 use crate::glsl::*;
@@ -660,6 +661,7 @@ impl VulkanEngine {
         active_workspace: u32,
         is_session_locked: bool,
         password_length: u32,
+        active_menu: Option<ActiveMenu>,
     ) {
         unsafe {
             // Wait for previous GPU frames to complete
@@ -884,6 +886,19 @@ impl VulkanEngine {
                     screen_h, screen_w,
                     (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
                     2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
+                );
+            }
+
+            // Render interactive CDE procedural dropdown menu
+            if let Some(menu) = active_menu {
+                // is_focused = 5 signals your fragment shader to render a retro chiseled
+                // popup container overlay featuring 4 internal highlighted text item rows.
+                self.draw_procedural_ui_element(
+                    cmd_buf,
+                    screen_h,
+                    screen_w,
+                    (menu.x, menu.y, menu.width, menu.height),
+                    5u32,
                 );
             }
 

@@ -80,6 +80,7 @@ pub struct CdeCompositorState {
     pub pointer_location: (f64, f64),
     pub current_grab: GrabState,
     pub active_workspace: u32,
+    pub active_menu: Option<ActiveMenu>,
     pub session_lock_state: SessionLockManagerState,
     pub is_session_locked: bool,
     pub password_length: u32,
@@ -906,6 +907,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let mx = state.pointer_location.0 as f32;
                                     let my = state.pointer_location.1 as f32;
 
+                                    // ActiveMenu Dropdown
+                                    if let Some(menu) = state.active_menu {
+                                        if mx >= menu.x && mx <= (menu.x + menu.width) &&
+                                           my >= menu.y && my <= (menu.y + menu.height) {
+
+                                            // Map Y offset to the targeted row index
+                                            let relative_y = my - menu.y;
+                                            let clicked_row = (relative_y / CDE_MENU_ROW_HEIGHT).floor() as u32;
+
+                                            println!("CDE Menu Hook: Clicked Row Index [{}] on Window ID {}", clicked_row, menu.window_id);
+
+                                            // Execute classic structural actions natively
+                                            if let Some(w_idx) = state.open_windows.iter().position(|w| w.id == menu.window_id) {
+                                                match clicked_row {
+                                                    CDE_MENU_ITEM_RESTORE => {
+                                                        let win = &mut state.open_windows[w_idx];
+                                                        if win.is_minimized {
+                                                            println!("CDE Layout Engine: Restoring Window ID {} from icon state", menu.window_id);
+                                                            win.is_minimized = false;
+
+                                                            // Restore its 700x500 geometry mapping boundaries
+                                                            win.width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
+                                                            win.height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
+
+                                                            win.toplevel.with_pending_state(|xdg_state| {
+                                                                xdg_state.size = Some((700, 500).into());
+                                                            });
+                                                            win.toplevel.send_pending_configure();
+                                                        }
+                                                    }
+                                                    CDE_MENU_ITEM_MINIMIZE => {
+                                                        // Fallback into your existing button_type 2 minimization queue
+                                                        state.current_grab = GrabState::ButtonPressed { window_index: w_idx, button_type: 2 };
+                                                    }
+                                                    CDE_MENU_ITEM_LOWER => {
+                                                        // Lower: Shift target window to index 0 (absolute bottom of Z-stack)
+                                                        let target_win = state.open_windows.remove(w_idx);
+                                                        state.open_windows.insert(0, target_win);
+                                                        println!("CDE Layout Engine: Lowered Window Context ID {} to base of Z-stack.", menu.window_id);
+                                                    }
+                                                    CDE_MENU_ITEM_CLOSE => {
+                                                        if let Some(window) = state.open_windows.get(w_idx) {
+                                                            window.toplevel.send_close();
+                                                        }
+                                                    }
+                                                    _ => {} // Restore/Size placeholder steps
+                                                }
+                                            }
+                                            state.active_menu = None; // Dimiss menu after an item is clicked
+                                            return; // Intercepted: absorb click sequence step completely
+                                        } else {
+                                            // Clicked completely outside the active dropdown: Dismiss it instantly
+                                            state.active_menu = None;
+                                        }
+                                    }
+
                                     // Get current screen window dimensions from the Vulkan swapchain context
                                     let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
                                     let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
@@ -985,6 +1042,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                         return; // Intercepted: skip trailing window tests entirely!
+                                    }
+
+                                    // Locate which window was clicked under Z-order stacking rules
+                                    if let Some(w_idx) = state.open_windows.iter().position(|w| {
+                                        if w.workspace != state.active_workspace { return false; }
+
+                                        if w.is_minimized {
+                                            // Enforce strict 64x64 icon box bounds to prevent phantom collisions
+                                            mx >= w.x && mx <= (w.x + CDE_ICON_WIDTH) &&
+                                                my >= w.y && my <= (w.y + CDE_ICON_HEIGHT)
+                                        } else {
+                                            // Regular open windows evaluate standard titlebar decoration metrics
+                                            mx >= w.x && mx <= (w.x + w.width) &&
+                                            my >= w.y && my <= (w.y + w.height)
+                                        }
+                                    }) {
+                                        let window = &state.open_windows[w_idx];
+
+                                        state.current_grab = GrabState::Dragging {
+                                            window_index: w_idx,
+                                            start_mouse: (mx.into(), my.into()),
+                                            start_window: (window.x, window.y),
+                                        };
+
+                                        // Elevate the clicked window/icon to the top of the focus stack
+                                        let target = state.open_windows.remove(w_idx);
+                                        state.open_windows.push(target);
                                     }
 
                                     let mut hit_window = None;
@@ -1090,24 +1174,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 serial,
                                             );
                                         }
-                                        for (_index, window) in state.open_windows.iter_mut().enumerate().rev() { // XXX
-                                            if window.workspace == state.active_workspace && window.is_minimized {
-                                                // Evaluate if a click hits the 64x64 icon box bounds
-                                                if mx >= window.x && mx <= (window.x + CDE_ICON_WIDTH) &&
-                                                   my >= window.y && my <= (window.y + CDE_ICON_HEIGHT) {
-
-                                                    println!("CDE Icon Double-Click: Restoring Application Window ID: {}", window.id);
-                                                    window.is_minimized = false;
-
-                                                    // Restore original baseline dimensions configuration parameters
-                                                    window.width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
-                                                    window.height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
-
-                                                    //closed_a_window = true; // required?
-                                                    break;
-                                                }
-                                            }
-                                        }
                                     }
                                 }
                                 ButtonState::Released => {
@@ -1147,9 +1213,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     state.seat.get_keyboard().unwrap().set_focus(state, None, serial);
                                                 }
                                                 3 => {
-                                                    println!("Menu Dashboard Interaction Fired via Release Pass. todo!");
+                                                    println!("CDE Menu Hook: Spawning Dropdown Menu Box under Window ID {}", window.id);
+
+                                                    // Position the menu panel directly underneath the top-left titlebar edge arena
+                                                    let menu_w = 120.0; // Canonical compact Motif menu box width
+                                                    let menu_h = CDE_MENU_ROW_HEIGHT * 4.0; // 4 active action rows
+
+                                                    state.active_menu = Some(ActiveMenu {
+                                                        window_id: window.id,
+                                                        x: window.x + CDE_BORDER_WIDTH,
+                                                        y: window.y + CDE_TITLEBAR_HEIGHT,
+                                                        width: menu_w,
+                                                        height: menu_h,
+                                                        item_count: 4,
+                                                    });
                                                 }
                                                 _ => {}
+                                            }
+                                        }
+                                    }
+                                    if let GrabState::Dragging { window_index, start_mouse, .. } = state.current_grab {
+                                        let mx = state.pointer_location.0 as f64;
+                                        let my = state.pointer_location.1 as f64;
+
+                                        // Calculate if the user simply clicked or actually dragged the item
+                                        let delta_x = (mx - start_mouse.0).abs();
+                                        let delta_y = (my - start_mouse.1).abs();
+                                        let is_stationary_click = delta_x < 3.0 && delta_y < 3.0;
+
+                                        if let Some(window) = state.open_windows.get(window_index) {
+                                            if window.is_minimized && is_stationary_click {
+                                                // Clicking a minimized icon pops up its operations menu!
+                                                println!("CDE Menu Hook: Spawning Dropdown Menu Box under Icon Box ID {}", window.id);
+
+                                                let menu_w = 120.0;
+                                                let menu_h = (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0;
+
+                                                state.active_menu = Some(ActiveMenu {
+                                                    window_id: window.id,
+                                                    // Spawn the menu directly above or next to the icon box bounds
+                                                    x: window.x,
+                                                    y: window.y - menu_h,
+                                                    width: menu_w,
+                                                    height: menu_h,
+                                                    item_count: 4,
+                                                });
                                             }
                                         }
                                     }
@@ -1290,7 +1398,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         //        }
 
                 // Execute unified chiseled CDE border drawing pass loop sequentially
-                state.vulkan_engine.draw_frame(&state.open_windows, state.current_grab, state.active_workspace, state.is_session_locked, state.password_length);
+                state.vulkan_engine.draw_frame(
+                    &state.open_windows,
+                    state.current_grab,
+                    state.active_workspace,
+                    state.is_session_locked,
+                    state.password_length,
+                    state.active_menu
+                );
                 backend.bind().unwrap();
             }
             _ => {}
@@ -1316,6 +1431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pointer_location: (0.0, 0.0),
         current_grab: GrabState::Idle,
         active_workspace: 0,
+        active_menu: None,
         session_lock_state,
         is_session_locked: false,
         password_length: 0,
@@ -1349,6 +1465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.active_workspace,
             state.is_session_locked,
             state.password_length,
+            state.active_menu,
         );
 
         // Natively drain and parse incoming client data on the thread context directly!

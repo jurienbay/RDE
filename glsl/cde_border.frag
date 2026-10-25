@@ -27,11 +27,78 @@ const float BEVEL_THICKNESS = 4.0;
 const float BORDER_WIDTH = 6.0;
 const float TITLEBAR_HEIGHT = 22.0;
 
+// ActiveMenu labels
+const uint CDE_LABEL_RESTORE[7]  = uint[](82u, 69u, 83u, 84u, 79u, 82u, 69u); // R,E,S,T,O,R,E
+const uint CDE_LABEL_MINIMIZE[8] = uint[](77u, 73u, 78u, 73u, 77u, 73u, 90u, 69u); // M,I,N,I,M,I,Z,E
+const uint CDE_LABEL_LOWER[5]    = uint[](76u, 79u, 87u, 69u, 82u); // L,O,W,E,R
+const uint CDE_LABEL_CLOSE[5]    = uint[](67u, 76u, 79u, 83u, 69u); // C,L,O,S,E
+
 // CDE HIGH-PERFORMANCE PROCEDURAL 5x7 ASCII CHARACTER RENDERING GENERATOR
 bool draw_cde_ascii_glyph(uint ascii, float x, float y) {
     if (x < 0.0 || x >= 5.0 || y < 0.0 || y >= 7.0) return false;
     int ix = int(x); int iy = int(y);
 
+    // Letter 'R' (ASCII 82)
+    if (ascii == 82u) {
+        if (ix == 0) return true;
+        if ((iy == 0 || iy == 3) && ix < 4) return true;
+        if (ix == 4 && (iy == 1 || iy == 2)) return true;
+        if (iy == 4 && ix == 2) return true;
+        if (iy == 5 && ix == 3) return true;
+        if (iy == 6 && ix == 4) return true;
+    }
+    // Letter 'E' (ASCII 69)
+    if (ascii == 69u) {
+        if (ix == 0) return true;
+        if (iy == 0 || iy == 3 || iy == 6) return true;
+    }
+    // Letter 'S' (ASCII 83)
+    if (ascii == 83u) {
+        if (iy == 0 || iy == 3 || iy == 6) { if (ix > 0 && ix < 4) return true; }
+        if (ix == 0 && (iy == 1 || iy == 2)) return true;
+        if (ix == 4 && (iy == 4 || iy == 5)) return true;
+        if ((iy == 0 || iy == 1) && ix == 4) return true;
+        if ((iy == 5 || iy == 6) && ix == 0) return true;
+    }
+    // Letter 'M' (ASCII 77)
+    if (ascii == 77u) {
+        if (ix == 0 || ix == 4) return true;
+        if (iy == 1 && (ix == 1 || ix == 3)) return true;
+        if (iy == 2 && ix == 2) return true;
+    }
+    // Letter 'I' (ASCII 73)
+    if (ascii == 73u) {
+        if (iy == 0 || iy == 6) return true;
+        if (ix == 2) return true;
+    }
+    // Letter 'N' (ASCII 78)
+    if (ascii == 78u) {
+        if (ix == 0 || ix == 4) return true;
+        if (ix == 1 && iy == 2) return true;
+        if (ix == 2 && iy == 3) return true;
+        if (ix == 3 && iy == 4) return true;
+    }
+    // Letter 'Z' (ASCII 90)
+    if (ascii == 90u) {
+        if (iy == 0 || iy == 6) return true;
+        if (ix + iy == 6) return true;
+    }
+    // Letter 'L' (ASCII 76)
+    if (ascii == 76u) {
+        if (ix == 0) return true;
+        if (iy == 6) return true;
+    }
+    // Letter 'W' (ASCII 87)
+    if (ascii == 87u) {
+        if (ix == 0 || ix == 4) return true;
+        if (iy == 5 && (ix == 1 || ix == 3)) return true;
+        if (iy == 4 && ix == 2) return true;
+    }
+    // Letter 'C' (ASCII 67)
+    if (ascii == 67u) {
+        if (ix == 0 && iy > 0 && iy < 6) return true;
+        if ((iy == 0 || iy == 6) && ix > 0) return true;
+    }
     // Letter 'F' (ASCII 70)
     if (ascii == 70u || ascii == 102u) {
         if (ix == 0) return true;
@@ -336,6 +403,78 @@ void main() {
             outColor = finalColor;
             return; // Exit main pipeline execution early to short-circuit window decorators!
         }
+	////
+
+	// is_focused == 5 -> RENDER PROCEDURAL CDE DROPDOWN MENU
+	if (push.is_focused == 5u) {
+	    float local_x = inPixelPos.x;
+	    float local_y_pos = push.element_size.y - inPixelPos.y;
+
+	    vec3 color = vec3(0.73, 0.73, 0.73); // Motif Light Grey
+
+	    // Procedural 3D chiseled outer border edges
+	    float border_thickness = 2.0;
+	    if (inPixelPos.x < border_thickness || inPixelPos.y < border_thickness) {
+	        color = vec3(0.95, 0.95, 0.95); // Top/Left highlight lines
+	    }
+	    if (inPixelPos.x > push.element_size.x - border_thickness || inPixelPos.y > push.element_size.y - border_thickness) {
+	        color = vec3(0.45, 0.45, 0.45); // Bottom/Right shadow lines
+	    }
+
+	    // Procedural horizontal row partition lanes (20.0px segments)
+	    float row_height = 20.0;
+	    float adjusted_y = local_y_pos - border_thickness;
+
+	    if (adjusted_y >= 0.0 && adjusted_y < (row_height * 4.0)) {
+	        float row_index = 3.0 - floor(adjusted_y / row_height);
+	        float local_y = mod(adjusted_y, row_height);
+
+	        // Carve out sharp 1px chiseled separator grooves between menu entries
+	        if (local_y < 1.0) {
+	            color = vec3(0.42, 0.42, 0.42); // Groove shadow line
+	        } else if (local_y > row_height - 1.0) {
+	            color = vec3(0.95, 0.95, 0.95); // Groove highlight line
+	        }
+
+	        // Highlight the destructive Close zone locked perfectly inside row index 3
+	        if (row_index == 3.0 && local_y > 1.0 && local_y < row_height - 1.0) {
+	            color = vec3(0.58, 0.58, 0.58); // Dark gray row fill
+	        }
+
+	        // Aligned CDE menu text generator
+	        float text_local_x = local_x - 12.0;
+	        float text_local_y = (row_height - local_y) - 6.0;
+
+	        if (text_local_x >= 0.0 && text_local_y >= 0.0 && text_local_y < 7.0) {
+	            float glyph_x = mod(text_local_x, 6.0);
+
+	            // Standard, non-inverted index sweep matching character arrays chronologically
+	            uint char_idx = uint(floor(text_local_x / 6.0));
+	            uint current_ascii = 0u;
+
+	            if (row_index == 0.0) {      // ROW 0: RESTORE
+	                if (char_idx < 7u) current_ascii = CDE_LABEL_RESTORE[char_idx];
+	            }
+	            else if (row_index == 1.0) { // ROW 1: MINIMIZE
+	                if (char_idx < 8u) current_ascii = CDE_LABEL_MINIMIZE[char_idx];
+	            }
+	            else if (row_index == 2.0) { // ROW 2: LOWER
+	                if (char_idx < 5u) current_ascii = CDE_LABEL_LOWER[char_idx];
+	            }
+	            else if (row_index == 3.0) { // ROW 3: CLOSE
+	                if (char_idx < 5u) current_ascii = CDE_LABEL_CLOSE[char_idx];
+	            }
+
+	            // Print fonts natively onto the pipeline grid
+	            if (current_ascii != 0u && draw_cde_ascii_glyph(current_ascii, glyph_x, text_local_y)) {
+	                color = (row_index == 3.0) ? vec3(1.0, 1.0, 1.0) : vec3(0.15, 0.15, 0.15);
+	            }
+	        }
+	    }
+
+	    outColor = vec4(color, 1.0);
+	    return;
+	}
 	////
 
 	// Thin outer black etch line (Highest priority on extreme edges)

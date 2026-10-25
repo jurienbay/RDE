@@ -16,6 +16,16 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveMenu {
+    pub window_id: u32, // The application window this menu is acting upon
+    pub x: f32,         // Screen coordinates where the menu box stands
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub item_count: u32,
+}
+
 // Structural context representing a single floating CDE application window
 pub struct WindowContext {
     pub id: u32, // Unique window instance tag identifier

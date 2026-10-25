@@ -26,3 +26,10 @@ pub const CDE_RECESSED_ENTRY_HEIGHT: f32 = 24.0;
 pub const CDE_CASCADE_OFFSET_STEP: f32 = 24.0;
 pub const BASELINE_ORIGIN_X: f32 = 30.0;
 pub const BASELINE_ORIGIN_Y: f32 = 40.0;
+
+/// CDE Window Menu Row Items ordered sequentially
+pub const CDE_MENU_ITEM_RESTORE: u32  = 0;
+pub const CDE_MENU_ITEM_MINIMIZE: u32 = 1;
+pub const CDE_MENU_ITEM_LOWER: u32    = 2;
+pub const CDE_MENU_ITEM_CLOSE: u32    = 3;
+pub const CDE_MENU_ROW_HEIGHT: f32    = 20.0; // Padded text lane line metric
