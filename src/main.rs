@@ -76,6 +76,7 @@ pub struct CdeCompositorState {
     pub seat: Seat<CdeCompositorState>,
     pub vulkan_engine: VulkanEngine,
     pub open_windows: Vec<WindowContext>, // Tracks the Z-order list of active clients
+    pub cascade_step_index: u32,
     pub pointer_location: (f64, f64),
     pub current_grab: GrabState,
     pub active_workspace: u32,
@@ -342,14 +343,38 @@ impl XdgShellHandler for CdeCompositorState {
         let overall_width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
         let overall_height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
 
+        // TODO(): Split cascade coordinate cal into own helper.
+        // Calculate current raw coordinate offsets based on step indices
+        let mut spawn_x = BASELINE_ORIGIN_X + (self.cascade_step_index as f32 * CDE_CASCADE_OFFSET_STEP);
+        let mut spawn_y = BASELINE_ORIGIN_Y + (self.cascade_step_index as f32 * CDE_CASCADE_OFFSET_STEP);
+
+        // Fetch monitor screen scale boundaries to enforce edge wrapping constraints
+        let swapchain_extent = self.vulkan_engine.swapchain_extent;
+        let screen_w = swapchain_extent.width as f32;
+        let screen_h = swapchain_extent.height as f32;
+
+        // Boundary constraints: Ensure the cascading blocks wrap cleanly if they hit the bottom dock panels margin edge
+        let max_safe_y = screen_h - CDE_PANEL_HEIGHT - CDE_ICON_HEIGHT - overall_height - 40.0;
+        let max_safe_x = screen_w - overall_width - 40.0;
+
+        if spawn_y > max_safe_y || spawn_x > max_safe_x {
+            self.cascade_step_index = 0;
+            spawn_x = BASELINE_ORIGIN_X;
+            spawn_y = BASELINE_ORIGIN_Y;
+            println!("CDE Window Matrix: Cascade hit layout boundaries. Wrapping coordinates back to origin matrix index.");
+        }
+        self.cascade_step_index += 1;
+        println!("CDE Window Matrix: Window ID {} parked at cascade coordinate index [({}, {})]", id, spawn_x, spawn_y);
+        // TODO()^.
+
         // Register it in our CDE Z-order stacking list at coordinates (50, 50)
         self.open_windows.push(WindowContext {
             // TODO(): Make a new() impl for WindowContext or
             // Default::defaults().
             id,
             toplevel,
-            x: 50.0,
-            y: 50.0,
+            x: spawn_x, // cascade spawned application coordinates
+            y: spawn_y, // ..
             width: overall_width,
             height: overall_height,
             workspace: self.active_workspace,
@@ -1287,6 +1312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seat,
         vulkan_engine,
         open_windows: Vec::new(),
+        cascade_step_index: 0,
         pointer_location: (0.0, 0.0),
         current_grab: GrabState::Idle,
         active_workspace: 0,

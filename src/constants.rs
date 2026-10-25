@@ -21,3 +21,8 @@ pub const CDE_PANEL_WIDTH: f32 = 600.0;
 pub const CDE_LOCK_WIDTH: f32 = 340.0;
 pub const CDE_LOCK_HEIGHT: f32 = 180.0;
 pub const CDE_RECESSED_ENTRY_HEIGHT: f32 = 24.0;
+
+/// Traditional CDE step metrics baseline shifts window diagonal bounds by 24px increments
+pub const CDE_CASCADE_OFFSET_STEP: f32 = 24.0;
+pub const BASELINE_ORIGIN_X: f32 = 30.0;
+pub const BASELINE_ORIGIN_Y: f32 = 40.0;
