@@ -515,6 +515,35 @@ impl VulkanEngine {
         }
     }
 
+    /// Helper to queries requirements, allocates device-local GPU memory, and binds it to an image.
+    fn allocate_and_bind_image_memory(&self, image: vk::Image, import_fd: Option<i32>) -> vk::DeviceMemory {
+        unsafe {
+            // Allocate device memory and bind to texture_image...
+            // Look up the physical memory requirements for the destination GPU texture image
+            let img_mem_reqs = self.device.get_image_memory_requirements(image);
+            let img_mem_index = self.find_memory_type(
+                img_mem_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL, // Stored strictly in fast GPU VRAM pools
+            );
+            let mut img_alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(img_mem_reqs.size)
+                .memory_type_index(img_mem_index);
+
+            // Dynamically chain the file descriptor if it's a DMABUF zero-copy import pathway
+            let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+            if let Some(fd) = import_fd { // Bind file descriptor directly to Vulkan Device Memory
+                import_fd_info = import_fd_info.fd(fd); // Hand the leaked raw descriptor over to Vulkan !
+                img_alloc_info = img_alloc_info.push_next(&mut import_fd_info);
+            }
+
+            let memory = self.device.allocate_memory(&img_alloc_info, None).unwrap();
+            self.device.bind_image_memory(image, memory, 0).unwrap();
+
+            memory
+        }
+    }
+
     /// Submits a recorded command buffer to the graphics queue and presents the target swapchain image index.
     fn submit_and_present_frame(&self, cmd_buf: vk::CommandBuffer, image_index: u32) {
         unsafe {
@@ -934,6 +963,7 @@ impl VulkanEngine {
             let staging_buffer = self.device.create_buffer(&staging_info, None).unwrap();
 
             // Look up memory requirements and bind allocation mapping
+            // XXX dedup with self.allocate_and_bind_image_memory(staging_buffer) somehow?
             let mem_reqs = self.device.get_buffer_memory_requirements(staging_buffer);
             let mem_index = self.find_memory_type(
                 mem_reqs.memory_type_bits,
@@ -946,6 +976,7 @@ impl VulkanEngine {
             self.device
                 .bind_buffer_memory(staging_buffer, staging_memory, 0)
                 .unwrap();
+            // XXX
 
             // Map the memory and copy the raw client app bytes directly onto the staging area
             let data_ptr = self
@@ -988,20 +1019,7 @@ impl VulkanEngine {
                     .sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .samples(vk::SampleCountFlags::TYPE_1);
                 let new_image = self.device.create_image(&image_info, None).unwrap();
-                // Allocate device memory and bind to texture_image...
-                // (Standard device memory assignment omitted here for brevity)
-                // Look up the physical memory requirements for the destination GPU texture image
-                let img_mem_reqs = self.device.get_image_memory_requirements(new_image);
-                let img_mem_index = self.find_memory_type(
-                    img_mem_reqs.memory_type_bits,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL, // Stored strictly in fast GPU VRAM pools
-                );
-                let img_alloc_info = vk::MemoryAllocateInfo::default()
-                    .allocation_size(img_mem_reqs.size)
-                    .memory_type_index(img_mem_index);
-
-                let new_memory = self.device.allocate_memory(&img_alloc_info, None).unwrap();
-                self.device.bind_image_memory(new_image, new_memory, 0).unwrap();
+                let new_memory = self.allocate_and_bind_image_memory(new_image, None);
 
                 let new_view = create_default_2d_image_view(&self.device, new_image, vk::Format::B8G8R8A8_UNORM);
                 let new_descriptor_set = self.allocate_and_write_descriptor_set(new_view);
@@ -1194,11 +1212,6 @@ impl VulkanEngine {
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .samples(vk::SampleCountFlags::TYPE_1);
 
-            let imported_image = self.device.create_image(&image_info, None).unwrap();
-
-            // Query driver requirements for this specific image allocation mapping
-            let mem_reqs = self.device.get_image_memory_requirements(imported_image);
-
             ///////
             // Duplicate the file descriptor so Vulkan can take complete ownership of it
             let cloned_fd = fd.try_clone_to_owned()
@@ -1209,24 +1222,8 @@ impl VulkanEngine {
             let raw_fd = cloned_fd.into_raw_fd();
             /////
 
-            // Bind file descriptor directly to Vulkan Device Memory
-            let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
-                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-                /////.fd(fd.as_raw_fd()); // Consumes ownership of the file descriptor layout lane
-                .fd(raw_fd); // Hand the leaked raw descriptor over to Vulkan !
-
-            let alloc_info = vk::MemoryAllocateInfo::default()
-                .push_next(&mut import_fd_info)
-                .allocation_size(mem_reqs.size)
-                .memory_type_index(self.find_memory_type(
-                    mem_reqs.memory_type_bits,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                ));
-
-            let imported_memory = self.device.allocate_memory(&alloc_info, None).unwrap();
-            self.device
-                .bind_image_memory(imported_image, imported_memory, 0)
-                .unwrap();
+            let imported_image = self.device.create_image(&image_info, None).unwrap();
+            let imported_memory = self.allocate_and_bind_image_memory(imported_image, Some(raw_fd));
 
             // Transition barrier for debug as the first frame seems to freeze until it gets
             // resized???
