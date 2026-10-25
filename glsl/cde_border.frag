@@ -858,16 +858,17 @@ void main() {
 			} else if (cell_x > (col_w - b_bevel) || cell_y > (row_h - b_bevel)) {
 			    outColor = CDE_SHADOW;
 			} else {
-			    // Pass coordinate scales inward to frame your text labels safely
-			    if (draw_cde_label(cell_token, cell_x - (col_w - 16.0)/2.0, cell_y - (row_h - 7.0)/2.0)) {
-			        outColor = vec4(0.20, 0.20, 0.20, 1.0); // Sunken slate font etch
-			    } else {
-			        if (cell_token == active_desk_idx) {
-			            outColor = vec4(0.29, 0.43, 0.65, 1.0); // Active blue indicator
-			        } else {
-			            outColor = CDE_FACE_COLOR;
-			        }
-			    }
+				if (cell_token == active_desk_idx) {
+				    outColor = vec4(0.29, 0.43, 0.65, 1.0); // Active blue indicator focus block fill
+				} else {
+				    outColor = CDE_FACE_COLOR; // Inactive standard light grey button fill
+				}
+
+				// Pass coordinate scales inward to frame your text labels safely
+				if (draw_cde_label(cell_token, cell_x - (col_w - 16.0)/2.0, cell_y - (row_h - 7.0)/2.0)) {
+				    //outColor = vec4(0.20, 0.20, 0.20, 1.0); // Sunken slate font etch
+					outColor = (cell_token == active_desk_idx) ? vec4(1.0, 1.0, 1.0, 1.0) : vec4(0.15, 0.15, 0.15, 1.0);
+				}
 			}
                 }
             } else {
