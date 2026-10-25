@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Reasonable Desktop Enviroment (Wayland)
+Comment=Log in using retro desktop
+Exec=/usr/bin/rde
+Type=Application
+DesktopNames=RDE
+X-GDM-Session-Type=wayland
+Icon=/usr/share/pixmaps/rde-session-icon.svg

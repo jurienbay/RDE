@@ -25,5 +25,7 @@ shaderc = "0.10.1"
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/RDE", dest = "/usr/bin/rde", mode = "755" },
-    { source = "LICENSE", dest = "/usr/share/licenses/rde/LICENSE", mode = "644" }
+    { source = "LICENSE", dest = "/usr/share/licenses/rde/LICENSE", mode = "644" },
+    { source = "usr/share/rde.desktop", dest = "/usr/share/wayland-sessions/rde.desktop", mode ="644" },
+    { source = "usr/share/pixmaps/rde-session-icon.svg", dest = "/usr/share/pixmaps/rde-session-icon.svg", mode = "644" },
 ]
