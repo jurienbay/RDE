@@ -6,6 +6,10 @@ layout(location = 1) out vec2 outPixelPos;
 layout(push_constant) uniform PushConstants {
     mat4 mvp;
     vec2 element_size;
+    uint is_focused;
+    uint is_dragging;
+    uint is_pressed;
+    uint title_chars[16];
 } push;
 
 // Explicitly define 6 static vertex index combinations matching a standard TRIANGLE_LIST mesh quad
