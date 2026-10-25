@@ -1249,7 +1249,6 @@ impl VulkanEngine {
                 );
             });
 
-            let vulkan_format = map_drm_fourcc_to_vulkan(fourcc);
             let imported_view = create_default_2d_image_view(&self.device, imported_image, vulkan_format);
             // Dynamically allocate a separate descriptor set for this window:
             let new_descriptor_set = self.allocate_and_write_descriptor_set(imported_view);
