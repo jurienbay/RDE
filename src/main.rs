@@ -79,6 +79,8 @@ pub struct CdeCompositorState {
     pub cascade_step_index: u32,
     pub pointer_location: (f64, f64),
     pub current_grab: GrabState,
+    pub last_clicked_window_id: Option<u32>,
+    pub last_click_timestamp: Option<std::time::Instant>,
     pub active_workspace: u32,
     pub active_menu: Option<ActiveMenu>,
     pub session_lock_state: SessionLockManagerState,
@@ -1112,9 +1114,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 // HOVERING MENU DASH BUTTON -> ENGAGE PRESSED LOOK
                                                 if mx >= menu_btn_x && mx <= (menu_btn_x + CDE_BUTTON_SIZE) &&
                                                    my >= btn_y && my <= (btn_y + CDE_BUTTON_SIZE) {
-                                                    state.current_grab = GrabState::ButtonPressed { window_index: index, button_type: 3 };
-                                                    closed_a_window = true;
-                                                    break;
+                                                       let now = std::time::Instant::now();
+                                                       let is_double_click = state.last_clicked_window_id == Some(window.id) &&
+                                                        state.last_click_timestamp.map_or(false, |t| now.duration_since(t).as_millis() < 250);
+
+                                                       state.last_clicked_window_id = Some(window.id);
+                                                       state.last_click_timestamp = Some(now);
+
+                                                       if is_double_click {
+                                                           println!("CDE Shortcut: Menu Button Double-Click Caught! Hard-closing window context ID {}", window.id);
+                                                           state.open_windows[index].toplevel.send_close(); // Trigger Wayland XDG Close
+                                                           state.active_menu = None; // Terminate stuck visual remnants
+                                                       } else {
+                                                           // First Click: Engage visual state feedback
+                                                           state.current_grab = GrabState::ButtonPressed { window_index: index, button_type: 3 };
+                                                       }
+                                                       closed_a_window = true;
+                                                       break;
                                                 }
 
                                                 // Only allow window dragging if the user clicks inside the titlebar area
@@ -1430,6 +1446,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cascade_step_index: 0,
         pointer_location: (0.0, 0.0),
         current_grab: GrabState::Idle,
+        last_clicked_window_id: None,
+        last_click_timestamp: None,
         active_workspace: 0,
         active_menu: None,
         session_lock_state,
