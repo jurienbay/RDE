@@ -1,0 +1,46 @@
+name: Build RPM Package
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-rpm:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libinput-dev librust-libudev-sys-dev \
+                                librust-libdbus-sys-dev librust-libsystemd-dev libsystemd-dev libshaderc-dev \
+                                libseat-dev libgbm-dev libpixman-1-dev libxkbcommon-dev foot clang libclang-dev \
+                                llvm-dev libpam0g-dev rpm
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Rust Cache
+      uses: swatinem/rust-cache@v2
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Install cargo-generate-rpm
+      run: cargo install cargo-generate-rpm
+
+    - name: Generate RPM package
+      run: cargo generate-rpm
+
+    - name: Upload RPM Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rpm-package
+        path: target/generate-rpm/*.rpm
+        if-no-files-found: error
