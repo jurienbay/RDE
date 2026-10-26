@@ -33,3 +33,9 @@ pub const CDE_MENU_ITEM_MINIMIZE: u32 = 1;
 pub const CDE_MENU_ITEM_LOWER: u32    = 2;
 pub const CDE_MENU_ITEM_CLOSE: u32    = 3;
 pub const CDE_MENU_ROW_HEIGHT: f32    = 20.0; // Padded text lane line metric
+
+// CDE Workspace Root Menu Row Items ordered sequentially
+pub const CDE_ROOT_MENU_ITEM_TERMINAL: u32 = 0;
+pub const CDE_ROOT_MENU_ITEM_FILEMGR: u32  = 1;
+pub const CDE_ROOT_MENU_ITEM_LOCK: u32     = 2;
+pub const CDE_ROOT_MENU_ITEM_CANCEL: u32   = 3;

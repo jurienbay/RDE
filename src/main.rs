@@ -903,6 +903,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             },
                         );
 
+                        if event.button() == Some(MouseButton::Right) && button_state == ButtonState::Pressed {
+                            let mx = state.pointer_location.0 as f32;
+                            let my = state.pointer_location.1 as f32;
+
+                            // Search if right-click intersects any open app window on the active desk layout pane
+                            let hit_a_window = state.open_windows.iter().any(|w| {
+                                w.workspace == state.active_workspace && !w.is_minimized &&
+                                mx >= w.x && mx <= (w.x + w.width) &&
+                                my >= w.y && my <= (w.y + w.height)
+                            });
+
+                            if !hit_a_window {
+                                println!("CDE Root Menu: Right-clicked background canvas! Spawning global workspace selection menu.");
+
+                                let menu_w = 120.0;
+                                let menu_h = (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0; // 84.0px total box profile height
+
+                                state.active_menu = Some(ActiveMenu {
+                                    window_id: 0, // Window ID 0 signals a static root background panel assignment menu
+                                    x: mx,
+                                    y: my,
+                                    width: menu_w,
+                                    height: menu_h,
+                                    item_count: 4,
+                                });
+                                return; // Intercepted: absorb right-click sequence step completely
+                            }
+                        }
+
                         if event.button() == Some(MouseButton::Left) {
                             match button_state {
                                 ButtonState::Pressed => {
@@ -920,41 +949,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                             println!("CDE Menu Hook: Clicked Row Index [{}] on Window ID {}", clicked_row, menu.window_id);
 
-                                            // Execute classic structural actions natively
                                             if let Some(w_idx) = state.open_windows.iter().position(|w| w.id == menu.window_id) {
-                                                match clicked_row {
-                                                    CDE_MENU_ITEM_RESTORE => {
-                                                        let win = &mut state.open_windows[w_idx];
-                                                        if win.is_minimized {
-                                                            println!("CDE Layout Engine: Restoring Window ID {} from icon state", menu.window_id);
-                                                            win.is_minimized = false;
-
-                                                            // Restore its 700x500 geometry mapping boundaries
-                                                            win.width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
-                                                            win.height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
-
-                                                            win.toplevel.with_pending_state(|xdg_state| {
-                                                                xdg_state.size = Some((700, 500).into());
-                                                            });
-                                                            win.toplevel.send_pending_configure();
+                                                if menu.window_id == 0 {
+                                                    // Workspace Root Menu Selection Actions
+                                                    match clicked_row {
+                                                        CDE_ROOT_MENU_ITEM_TERMINAL => {
+                                                            println!("CDE Root Menu: Spawning Terminal Console.");
+                                                            std::process::Command::new("foot")
+                                                                .env("WAYLAND_DISPLAY", &closure_socket_name)
+                                                                .spawn().expect("Failed to execute client process");
                                                         }
-                                                    }
-                                                    CDE_MENU_ITEM_MINIMIZE => {
-                                                        // Fallback into your existing button_type 2 minimization queue
-                                                        state.current_grab = GrabState::ButtonPressed { window_index: w_idx, button_type: 2 };
-                                                    }
-                                                    CDE_MENU_ITEM_LOWER => {
-                                                        // Lower: Shift target window to index 0 (absolute bottom of Z-stack)
-                                                        let target_win = state.open_windows.remove(w_idx);
-                                                        state.open_windows.insert(0, target_win);
-                                                        println!("CDE Layout Engine: Lowered Window Context ID {} to base of Z-stack.", menu.window_id);
-                                                    }
-                                                    CDE_MENU_ITEM_CLOSE => {
-                                                        if let Some(window) = state.open_windows.get(w_idx) {
-                                                            window.toplevel.send_close();
+                                                        CDE_ROOT_MENU_ITEM_FILEMGR => {
+                                                            println!("CDE Root Menu: Spawning File Manager.");
+                                                            std::process::Command::new("pcmanfm")
+                                                                .env("WAYLAND_DISPLAY", &closure_socket_name)
+                                                                .spawn().expect("Failed to execute client process");
                                                         }
+                                                        CDE_ROOT_MENU_ITEM_LOCK => {
+                                                            if !state.is_session_locked {
+                                                                println!("CDE Root Menu: Locking session.");
+                                                                state.is_session_locked = true;
+                                                                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                                                                state.seat.get_keyboard().unwrap().set_focus(state, None, serial);
+                                                            }
+                                                        }
+                                                        _ => {} // Cancel row simply dismisses the popup window panel
                                                     }
-                                                    _ => {} // Restore/Size placeholder steps
+                                                    state.active_menu = None;
+                                                    return;
+                                                } else {
+                                                    match clicked_row {
+                                                        CDE_MENU_ITEM_RESTORE => {
+                                                            let win = &mut state.open_windows[w_idx];
+                                                            if win.is_minimized {
+                                                                println!("CDE Layout Engine: Restoring Window ID {} from icon state", menu.window_id);
+                                                                win.is_minimized = false;
+
+                                                                // Restore its 700x500 geometry mapping boundaries
+                                                                win.width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
+                                                                win.height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
+
+                                                                win.toplevel.with_pending_state(|xdg_state| {
+                                                                    xdg_state.size = Some((700, 500).into());
+                                                                });
+                                                                win.toplevel.send_pending_configure();
+                                                            }
+                                                        }
+                                                        CDE_MENU_ITEM_MINIMIZE => {
+                                                            // Fallback into your existing button_type 2 minimization queue
+                                                            state.current_grab = GrabState::ButtonPressed { window_index: w_idx, button_type: 2 };
+                                                        }
+                                                        CDE_MENU_ITEM_LOWER => {
+                                                            // Lower: Shift target window to index 0 (absolute bottom of Z-stack)
+                                                            let target_win = state.open_windows.remove(w_idx);
+                                                            state.open_windows.insert(0, target_win);
+                                                            println!("CDE Layout Engine: Lowered Window Context ID {} to base of Z-stack.", menu.window_id);
+                                                        }
+                                                        CDE_MENU_ITEM_CLOSE => {
+                                                            if let Some(window) = state.open_windows.get(w_idx) {
+                                                                window.toplevel.send_close();
+                                                            }
+                                                        }
+                                                        _ => {} // Restore/Size placeholder steps
+                                                    }
                                                 }
                                             }
                                             state.active_menu = None; // Dimiss menu after an item is clicked

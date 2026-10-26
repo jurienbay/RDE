@@ -916,6 +916,9 @@ impl VulkanEngine {
 
             // Render interactive CDE procedural dropdown menu
             if let Some(menu) = active_menu {
+                // If window_id == 0, we add (1 << 4) to shift state flag indices cleanly down the shader pipeline.
+                let packed_menu_flag = if menu.window_id == 0 { 5u32 | (1u32 << 4) } else { 5u32 };
+
                 // is_focused = 5 signals your fragment shader to render a retro chiseled
                 // popup container overlay featuring 4 internal highlighted text item rows.
                 self.draw_procedural_ui_element(
@@ -923,7 +926,7 @@ impl VulkanEngine {
                     screen_h,
                     screen_w,
                     (menu.x, menu.y, menu.width, menu.height),
-                    5u32,
+                    packed_menu_flag,
                 );
             }
 

@@ -27,6 +27,12 @@ const float BEVEL_THICKNESS = 4.0;
 const float BORDER_WIDTH = 6.0;
 const float TITLEBAR_HEIGHT = 22.0;
 
+// RootMenu labels
+const uint CDE_LABEL_TERMINAL[8] = uint[](84u, 69u, 82u, 77u, 73u, 78u, 65u, 76u); // T,E,R,M,I,N,A,L
+const uint CDE_LABEL_FILEMGR[8]  = uint[](70u, 73u, 76u, 69u, 32u, 77u, 71u, 82u); // F,I,L,E, ,M,G,R
+const uint CDE_LABEL_LOCKSCREEN[8]= uint[](76u, 79u, 67u, 75u, 32u, 83u, 67u, 82u); // L,O,C,K, ,S,C,R
+const uint CDE_LABEL_CANCEL[6]   = uint[](67u, 65u, 78u, 67u, 69u, 76u);         // C,A,N,C,E,L
+
 // ActiveMenu labels
 const uint CDE_LABEL_RESTORE[7]  = uint[](82u, 69u, 83u, 84u, 79u, 82u, 69u); // R,E,S,T,O,R,E
 const uint CDE_LABEL_MINIMIZE[8] = uint[](77u, 73u, 78u, 73u, 77u, 73u, 90u, 69u); // M,I,N,I,M,I,Z,E
@@ -534,6 +540,58 @@ void main() {
 	            }
 	        }
 	    }
+
+		if (adjusted_y >= 0.0 && adjusted_y < (row_height * 4.0)) {
+		        float row_index = 3.0 - floor(adjusted_y / row_height);
+		        float local_y = mod(adjusted_y, row_height);
+
+		        // Check if our higher bitwise mapping flag tracks a standard app menu or root menu background panel
+		        bool is_root_workspace_menu = (push.is_pressed == 1u); // Unpacks the upper-bit state flag shift
+
+		        float text_local_x = local_x - 12.0;
+		        float text_local_y = (row_height - local_y) - 6.0;
+
+		        if (text_local_x >= 0.0 && text_local_y >= 0.0 && text_local_y < 7.0) {
+		            float glyph_x = mod(text_local_x, 6.0);
+		            uint char_idx = uint(floor(text_local_x / 6.0));
+		            uint current_ascii = 0u;
+
+		            if (is_root_workspace_menu) {
+		                // Background root dashboard layout
+		                if (row_index == 0.0) {      // ROW 0: "TERMINAL"
+		                    if (char_idx < 8u) current_ascii = CDE_LABEL_TERMINAL[char_idx];
+		                }
+		                else if (row_index == 1.0) { // ROW 1: "FILE MGR"
+		                    if (char_idx < 8u) current_ascii = CDE_LABEL_FILEMGR[char_idx];
+		                }
+		                else if (row_index == 2.0) { // ROW 2: "LOCK SCR"
+		                    if (char_idx < 8u) current_ascii = CDE_LABEL_LOCKSCREEN[char_idx];
+		                }
+		                else if (row_index == 3.0) { // ROW 3: "CANCEL"
+		                    if (char_idx < 6u) current_ascii = CDE_LABEL_CANCEL[char_idx];
+		                }
+		            } else {
+		                // Standard window decorations menus
+		                if (row_index == 0.0) {
+		                    if (char_idx < 7u) current_ascii = CDE_LABEL_RESTORE[char_idx];
+		                }
+		                else if (row_index == 1.0) {
+		                    if (char_idx < 8u) current_ascii = CDE_LABEL_MINIMIZE[char_idx];
+		                }
+		                else if (row_index == 2.0) {
+		                    if (char_idx < 5u) current_ascii = CDE_LABEL_LOWER[char_idx];
+		                }
+		                else if (row_index == 3.0) {
+		                    if (char_idx < 5u) current_ascii = CDE_LABEL_CLOSE[char_idx];
+		                }
+		            }
+
+		            // Print fonts natively down the pipeline grid
+		            if (current_ascii != 0u && draw_cde_ascii_glyph(current_ascii, glyph_x, text_local_y)) {
+		                color = (row_index == 3.0) ? vec3(1.0, 1.0, 1.0) : vec3(0.15, 0.15, 0.15);
+		            }
+		        }
+		}
 
 	    outColor = vec4(color, 1.0);
 	    return;
