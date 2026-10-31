@@ -6,7 +6,9 @@ license = "BSD3"
 description = "Reasonable Desktop Enviroment is a CDE-lookalike Wayland compositor"
 
 [dependencies]
-smithay = { version = "0.7", features = ["backend_winit", "wayland_frontend"] }
+smithay = { version = "0.7", features = ["backend_winit", "backend_gbm", "backend_drm", "backend_session", "wayland_frontend"] }
+gbm = "0.18"
+drm = "0.15"
 wayland-server = "0.31"
 #calloop = "0.12"
 raw-window-handle = "0.6"

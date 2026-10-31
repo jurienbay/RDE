@@ -32,6 +32,8 @@ use secrecy::{ExposeSecret, SecretBox};
 use std::env;
 use std::sync::Arc;
 
+mod backend;
+use backend::HardwareBackendContext;
 mod constants;
 use constants::*;
 mod vk_engine;
@@ -63,6 +65,7 @@ pub enum GrabState {
 }
 
 pub struct CdeCompositorState {
+    pub hardware_backend: Option<HardwareBackendContext>,
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState, // Standard tracking manager for app frames
@@ -546,7 +549,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop = EventLoop::<CdeCompositorState>::try_new()?;
     let display = Display::<CdeCompositorState>::new()?;
     let display_handle = display.handle();
+    let loop_handle = event_loop.handle();
 
+    let mut hardware_backend: Option<HardwareBackendContext> = None;
     let mut backend_winit = None;
 
     if is_nested {
@@ -555,6 +560,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend_winit = Some((winit_backend, winit_loop));
     } else {
         println!("Mode Selection: Booting bare-metal directly targeting raw hardware KMS panels. Try --nested");
+        // Automatically binds to libseat or systemd-logind.
+        let (mut session, session_notifier) = smithay::backend::session::libseat::LibSeatSession::new()?;
+        // Insert the session notifier directly into Calloop to process VT switches (Ctrl+Alt+F1, etc.) cleanly
+        loop_handle.insert_source(session_notifier, move |_, _, _| {})?;
+        // Initialize your context passing our managed secure rootless session token
+        let mut hw_context = backend::HardwareBackendContext::init(&mut session, "/dev/dri/card0")?;
+        hw_context.register_event_source(&loop_handle, |crtc_handle, state: &mut CdeCompositorState| {
+            if let Some(ref mut hw_ctx) = state.hardware_backend {
+                let next_frame = state.vulkan_engine.draw_frame(
+                    &state.open_windows,
+                    state.current_grab,
+                    state.active_workspace,
+                    state.is_session_locked,
+                    state.password_length,
+                    state.active_menu,
+                );
+
+                // Stubbed out until vk_engine.rs is refactored to return GBM allocation buffers
+                todo!("Headless hardware presentation path integration is pending vk_engine.rs refactoring");
+                //let _ = hw_ctx.scanout_buffer(next_frame);
+            }
+        })?;
+
+        hardware_backend = Some(hw_context);
     }
 
     // Register global protocols into our Wayland socket
@@ -604,7 +633,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vulkan_engine = if let Some(ref b) = backend_ref {
         VulkanEngine::init(b)
     } else {
-        todo!("Implement headless/GBM pipeline allocation path")
+        let hw = hardware_backend.as_mut().unwrap();
+        VulkanEngine::init_headless(
+            hw.active_mode.size().0 as u32,
+            hw.active_mode.size().1 as u32,
+            &mut hw.gbm_allocator,
+        )
     };
     let mut dmabuf_state = smithay::wayland::dmabuf::DmabufState::new();
 
@@ -646,6 +680,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             refresh: 60_000, // 60kHz
         };
         main_output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    } else if let Some(ref hw) = hardware_backend {
+        // Extract native bare-metal resolution metrics from the hardware layout
+        let mode = smithay::output::Mode {
+            size: (hw.active_mode.size().0 as i32, hw.active_mode.size().1 as i32).into(),
+            refresh: hw.active_mode.vrefresh() as i32 * 1000,
+        };
+        main_output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
     }
 
     let listening_socket = smithay::wayland::socket::ListeningSocketSource::new_auto()?;
@@ -654,7 +695,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string_lossy()
         .into_owned();
 
-    let loop_handle = event_loop.handle();
     let closure_socket_name = socket_name.clone();
 
     // Register Client Connectivity Hook
@@ -1508,6 +1548,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } // xXX
 
     let mut state = CdeCompositorState {
+        hardware_backend: hardware_backend,
         display_handle: display_handle,
         compositor_state,
         xdg_shell_state,
@@ -1549,21 +1590,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Run any Calloop tasks (like drawing timelines or catching mouse focus changes)
         // Set timeout to None or a minimal duration to prevent locking the network socket
-        event_loop.dispatch(std::time::Duration::from_millis(1), &mut state)?;
+        // Pass minimal timeouts if headless to wait natively for driver page flips
+        let timeout = if is_nested {
+            std::time::Duration::from_millis(1)
+        } else {
+            std::time::Duration::from_millis(16) // Throttles down loop spinning when bare-metal
+        };
+        event_loop.dispatch(timeout, &mut state)?;
         // XXX figure out how to let the CPU sleep more without freezing the screen?
         //event_loop.dispatch(None, &mut state)?;
 
         // Drive Vulkan rendering pipeline at the display's native pace.
         // Because this loop runs continuously, open windows (like weston-simple-egl)
         // are repainted on every single cycle at full speed without needing mouse movement.
-        state.vulkan_engine.draw_frame(
-            &state.open_windows,
-            state.current_grab,
-            state.active_workspace,
-            state.is_session_locked,
-            state.password_length,
-            state.active_menu,
-        );
+        // Only force non-VBlank rendering ticks if running nested inside a window manager canvas
+        if is_nested {
+            state.vulkan_engine.draw_frame(
+                &state.open_windows,
+                state.current_grab,
+                state.active_workspace,
+                state.is_session_locked,
+                state.password_length,
+                state.active_menu,
+            );
+        }
 
         // Natively drain and parse incoming client data on the thread context directly!
         // This solves the immutable borrow problem from the event source closure wrapper.

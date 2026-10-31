@@ -3,6 +3,8 @@
 
 use ash::{Device, Entry, Instance, khr, vk};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use smithay::backend::allocator::gbm::{GbmAllocator, GbmBuffer};
+use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::WinitGraphicsBackend;
 
@@ -55,6 +57,14 @@ impl Drop for WindowTexture {
     }
 }
 
+pub struct GbmRenderFrame {
+    pub gbm_buffer: GbmBuffer,
+    pub image: vk::Image,
+    pub memory: vk::DeviceMemory,
+    pub view: vk::ImageView,
+    pub framebuffer: vk::Framebuffer,
+}
+
 pub struct VulkanEngine {
     _entry: Entry,
     pub instance: Instance,
@@ -72,6 +82,10 @@ pub struct VulkanEngine {
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<vk::ImageView>,
     pub swapchain_extent: vk::Extent2D,
+
+    // Headless Hardware Allocations tracking states
+    pub render_frames: Vec<GbmRenderFrame>,
+    pub current_frame_index: usize,
 
     // Pipeline infrastructure
     pub render_pass: vk::RenderPass,
@@ -473,6 +487,8 @@ impl VulkanEngine {
             swapchain_images,
             swapchain_image_views,
             swapchain_extent,
+            render_frames: vec!(),
+            current_frame_index: 0,
             render_pass,
             descriptor_set_layout,
             pipeline_layout,
@@ -490,6 +506,15 @@ impl VulkanEngine {
 
             window_textures: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    pub fn init_headless(
+        width: u32,
+        height: u32,
+        allocator: &mut GbmAllocator<DrmDeviceFd>,
+    ) -> Self {
+        let entry = unsafe { Entry::load().expect("Failed to load Vulkan library") };
+        todo!("Final configuration variables wiring matches properties matching the fields above")
     }
 
     /// Helper utility to allocate a descriptor set and link it to an image view.
@@ -662,7 +687,7 @@ impl VulkanEngine {
         is_session_locked: bool,
         password_length: u32,
         active_menu: Option<ActiveMenu>,
-    ) {
+    ) -> Option<&GbmBuffer> {
         unsafe {
             // Wait for previous GPU frames to complete
             self.device
@@ -673,22 +698,31 @@ impl VulkanEngine {
             let screen_w = self.swapchain_extent.width as f32;
             let screen_h = self.swapchain_extent.height as f32;
 
-            // Safely handle OUT_OF_DATE errors when acquiring the next swapchain image slot
-            let acquire_result = self.swapchain_loader.acquire_next_image(
-                self.swapchain,
-                u64::MAX,
-                self.image_available_semaphore,
-                vk::Fence::null(),
-            );
-            // Acquire next swapchain slot index
-            let image_index = match acquire_result {
-                Ok((index, _)) => index,
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    // Window shifted size mid-cycle! Skip this frame and bail
-                    println!("Swapchain out of date during image acquisition. Skipping frame...");
-                    return;
-                }
-                Err(e) => panic!("Fatal swapchain image acquire failure: {:?}", e),
+            let (image_index, target_framebuffer) = if self.swapchain != vk::SwapchainKHR::null() {
+                // WINDOWED WINIT PATH: Acquire next frame out of the live window engine queue layout
+                // Handle OUT_OF_DATE errors when acquiring the next swapchain image slot
+                let acquire_result = self.swapchain_loader.acquire_next_image(
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_available_semaphore,
+                    vk::Fence::null(),
+                );
+                // Acquire next swapchain slot index
+                let idx = match acquire_result {
+                    Ok((index, _)) => index,
+                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                        // Window shifted size mid-cycle! Skip this frame and bail
+                        println!("Swapchain out of date during image acquisition. Skipping frame...");
+                        return None;
+                    }
+                    Err(e) => panic!("Fatal swapchain image acquire failure: {:?}", e),
+                };
+
+                (idx as usize, self.framebuffers[idx as usize])
+            } else {
+                // BARE-METAL HARDWARE PATH: Advance manual frame counter through our internal double-buffer array
+                self.current_frame_index = (self.current_frame_index + 1) % self.render_frames.len();
+                (self.current_frame_index, self.render_frames[self.current_frame_index].framebuffer)
             };
 
             self.device
@@ -706,7 +740,8 @@ impl VulkanEngine {
             let clear_values = workspace_clear_colour(active_workspace);
             let render_pass_begin_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass)
-                .framebuffer(self.framebuffers[image_index as usize])
+                .framebuffer(target_framebuffer) // Dynamically targets the explicit Winit or GBM framebuffer calculated above
+                //.framebuffer(self.framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: self.swapchain_extent,
@@ -738,8 +773,8 @@ impl VulkanEngine {
                 self.device.end_command_buffer(cmd_buf).unwrap();
 
                 // Submit primitives directly down the hardware queues
-                self.submit_and_present_frame(cmd_buf, image_index);
-                return; // Ensure background windows aren't drawn!
+                self.submit_and_present_frame(cmd_buf, image_index as u32);
+                return None; // Ensure background windows aren't drawn!
             }
 
             // Draw our retro 3D chiseled element container
@@ -932,7 +967,18 @@ impl VulkanEngine {
 
             self.device.cmd_end_render_pass(cmd_buf);
             self.device.end_command_buffer(cmd_buf).unwrap();
-            self.submit_and_present_frame(cmd_buf, image_index);
+
+            if self.swapchain != vk::SwapchainKHR::null() {
+                // Winit path presents straight downstream into the windowing surface frame queue
+                self.submit_and_present_frame(cmd_buf, image_index as u32);
+                None
+            } else {
+                // Bare-metal hardware path pushes recorded commands to the queue and returns the active GBM texture handle
+                let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd_buf));
+                self.device.queue_submit(self.graphics_queue, std::slice::from_ref(&submit_info), self.in_flight_fence).unwrap();
+                Some(&self.render_frames[image_index].gbm_buffer)
+            }
+            //self.submit_and_present_frame(cmd_buf, image_index);
         }
     }
 
