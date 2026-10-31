@@ -29,6 +29,7 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 
 use secrecy::{ExposeSecret, SecretBox};
 
+use std::env;
 use std::sync::Arc;
 
 mod constants;
@@ -539,9 +540,22 @@ fn verify_current_user_inline_secure(secure_password: &SecretBox<Vec<u8>>) -> bo
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    let is_nested = args.contains(&"--nested".to_string());
+
     let mut event_loop = EventLoop::<CdeCompositorState>::try_new()?;
     let display = Display::<CdeCompositorState>::new()?;
     let display_handle = display.handle();
+
+    let mut backend_winit = None;
+
+    if is_nested {
+        println!("Mode Selection: Launching running inside an standard window layout (Nested Mode).");
+        let (winit_backend, winit_loop) = smithay::backend::winit::init()?;
+        backend_winit = Some((winit_backend, winit_loop));
+    } else {
+        println!("Mode Selection: Booting bare-metal directly targeting raw hardware KMS panels. Try --nested");
+    }
 
     // Register global protocols into our Wayland socket
     let compositor_state = CompositorState::new::<CdeCompositorState>(&display_handle);
@@ -586,8 +600,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allocate the screen into our Wayland display global context layout registry
     main_output.create_global::<CdeCompositorState>(&display_handle);
 
-    let (mut backend, winit_loop) = winit::init()?;
-    let vulkan_engine = VulkanEngine::init(&backend);
+    let mut backend_ref = backend_winit.as_mut().map(|(b, _)| b);
+    let vulkan_engine = if let Some(ref b) = backend_ref {
+        VulkanEngine::init(b)
+    } else {
+        todo!("Implement headless/GBM pipeline allocation path")
+    };
     let mut dmabuf_state = smithay::wayland::dmabuf::DmabufState::new();
 
     // Define the formats Vulkan backend expects.
@@ -621,12 +639,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Update virtual monitor modes based on the Winit window physical resolution
-    let winit_size = backend.window().inner_size();
-    let mode = smithay::output::Mode {
-        size: (winit_size.width as i32, winit_size.height as i32).into(),
-        refresh: 60_000, // 60kHz
-    };
-    main_output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    if let Some(ref b) = backend_ref {
+        let winit_size = b.window().inner_size();
+        let mode = smithay::output::Mode {
+            size: (winit_size.width as i32, winit_size.height as i32).into(),
+            refresh: 60_000, // 60kHz
+        };
+        main_output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    }
 
     let listening_socket = smithay::wayland::socket::ListeningSocketSource::new_auto()?;
     let socket_name = listening_socket
@@ -656,6 +676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Register Winit Display Event Stream directly to Calloop
+    if let Some((mut winit_backend, winit_loop)) = backend_winit { // xXX
     loop_handle.insert_source(winit_loop, move |event, _, state| {
         match event {
             WinitEvent::Resized { .. } => {
@@ -1479,11 +1500,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.password_length,
                     state.active_menu
                 );
-                backend.bind().unwrap();
+                winit_backend.bind().unwrap();
             }
             _ => {}
         }
     })?;
+    } // xXX
 
     let mut state = CdeCompositorState {
         display_handle: display_handle,
