@@ -29,3 +29,16 @@ assets = [
     { source = "usr/share/rde.desktop", dest = "/usr/share/wayland-sessions/rde.desktop", mode ="644" },
     { source = "usr/share/pixmaps/rde-session-icon.svg", dest = "/usr/share/pixmaps/rde-session-icon.svg", mode = "644" },
 ]
+
+[package.metadata.deb]
+maintainer = "Dr No1 <dr.no1@goodluck.com>"
+depends = "$auto" # Dynamically checks system dependencies for smithay, xkbcommon, ash, etc.
+section = "x11"   # Fits a Wayland compositor / Desktop environment
+priority = "optional"
+assets = [
+    # [ Source path, Destination path, Permissions ]
+    ["target/release/RDE", "usr/bin/rde", "755"],
+    ["LICENSE", "usr/share/doc/rde/copyright", "644"],
+    ["usr/share/rde.desktop", "usr/share/wayland-sessions/rde.desktop", "644"],
+    ["usr/share/pixmaps/rde-session-icon.svg", "usr/share/pixmaps/rde-session-icon.svg", "644"]
+]
