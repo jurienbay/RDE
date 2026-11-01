@@ -568,18 +568,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut hw_context = backend::HardwareBackendContext::init(&mut session, "/dev/dri/card0")?;
         hw_context.register_event_source(&loop_handle, |crtc_handle, state: &mut CdeCompositorState| {
             if let Some(ref mut hw_ctx) = state.hardware_backend {
-                let next_frame = state.vulkan_engine.draw_frame(
+                // Draw frames and pull the mapped GBM surface out of the engine pipelines
+                if let Some(output_buffer) = state.vulkan_engine.draw_frame(
                     &state.open_windows,
                     state.current_grab,
                     state.active_workspace,
                     state.is_session_locked,
                     state.password_length,
                     state.active_menu,
-                );
-
-                // Stubbed out until vk_engine.rs is refactored to return GBM allocation buffers
-                todo!("Headless hardware presentation path integration is pending vk_engine.rs refactoring");
-                //let _ = hw_ctx.scanout_buffer(next_frame);
+                ) {
+                    // Send the completed surface layout directly to physical monitor plane connections via KMS PageFlips
+                    let _ = hw_ctx.scanout_buffer(output_buffer);
+                }
             }
         })?;
 

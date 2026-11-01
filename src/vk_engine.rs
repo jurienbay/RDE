@@ -3,14 +3,15 @@
 
 use ash::{Device, Entry, Instance, khr, vk};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use smithay::backend::allocator::dmabuf::AsDmabuf;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBuffer};
 use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::WinitGraphicsBackend;
 
-use std::sync::Arc;
 use std::os::fd::BorrowedFd;
 use std::os::linux::fs::MetadataExt;
+use std::sync::Arc;
 
 use crate::ActiveMenu;
 use crate::WindowContext;
@@ -137,83 +138,57 @@ fn find_pass_ortho_matrix(h: f32, w: f32, wx: f32, wy: f32) -> [f32; 16] {
 
 impl VulkanEngine {
     pub fn init(backend: &WinitGraphicsBackend<GlesRenderer>) -> Self {
-        let entry = unsafe { Entry::load().expect("Failed to load Vulkan library") };
-
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(c"CDE Wayland Compositor")
-            .api_version(vk::API_VERSION_1_3);
-
-        // Extract the unique system handle for the primary rendering GPU
-        // On modern Linux environments, /dev/dri/renderD128 is the standard first GPU card slot.
         let render_node_or_gpu_device_handle = std::fs::metadata("/dev/dri/renderD128")
-            .map(|meta| meta.st_rdev()) // Gets the raw dev_t bits (major/minor numbers)
-            .unwrap_or(0); // Fallback to 0 if running in a unique sandbox/nested environment
-
+            .map(|meta| meta.st_rdev())
+            .unwrap_or(0);
         let window_raw = backend.window();
         let window_handle = window_raw.window_handle().unwrap().as_raw();
         let display_handle = window_raw.display_handle().unwrap().as_raw();
 
-        let mut extension_names = ash_window::enumerate_required_extensions(display_handle)
+        let mut instance_extensions = ash_window::enumerate_required_extensions(display_handle)
             .expect("Failed to locate surface extensions")
             .to_vec();
-
-        // Add swapchain and surface extensions explicitly
-        extension_names.push(khr::surface::NAME.as_ptr());
-
-        let create_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(&extension_names);
-
-        let instance = unsafe {
-            entry
-                .create_instance(&create_info, None)
-                .expect("Failed to init instance")
-        };
-
-        // Surface Initialization
-        let surface = unsafe {
-            ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
-                .expect("Failed to create window surface")
-        };
-        let surface_loader = khr::surface::Instance::new(&entry, &instance);
-
-        // Hardware Selection
-        let pdevices = unsafe { instance.enumerate_physical_devices().expect("No GPU found") };
-        let physical_device = pdevices[0];
-
-        // Queue Setup
-        let queue_family_index = 0; // Standard primary graphics lane target
-        let queue_priorities = [1.0f32];
-        let queue_create_info = vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .queue_priorities(&queue_priorities);
-
+        instance_extensions.push(khr::surface::NAME.as_ptr());
         let device_extensions = [
             ash::khr::swapchain::NAME.as_ptr(),
             ash::khr::external_memory_fd::NAME.as_ptr(),
             ash::ext::external_memory_dma_buf::NAME.as_ptr(),
         ];
-        let device_create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(std::slice::from_ref(&queue_create_info))
-            .enabled_extension_names(&device_extensions);
 
-        let device = unsafe {
-            instance
-                .create_device(physical_device, &device_create_info, None)
-                .expect("Failed to instantiate logical Vulkan device")
+        let (entry, instance, physical_device, device, graphics_queue) = Self::create_core_device(
+            &instance_extensions,
+            &device_extensions,
+            render_node_or_gpu_device_handle,
+        );
+
+        let surface = unsafe {
+            ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
+                .expect("Failed to create window surface")
         };
-
-        let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let surface_loader = khr::surface::Instance::new(&entry, &instance);
         let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
 
-        // Define Swapchain Dimensions matching current host window
         let inner_size = window_raw.inner_size();
         let swapchain_extent = vk::Extent2D {
             width: inner_size.width,
             height: inner_size.height,
         };
 
-        // Create Swapchain
+        let (
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+            texture_sampler,
+            render_pass,
+            pipeline_layout,
+            graphics_pipeline,
+        ) = Self::create_pipeline_infrastructure(
+            &device,
+            swapchain_extent,
+            vk::ImageLayout::PRESENT_SRC_KHR,
+        );
+
+        // Window presentation-specific attachments logic continues here...
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(2)
@@ -232,14 +207,369 @@ impl VulkanEngine {
                 .create_swapchain(&swapchain_create_info, None)
                 .unwrap()
         };
-
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain).unwrap() };
         let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
             .iter()
             .map(|&image| create_default_2d_image_view(&device, image, vk::Format::B8G8R8A8_UNORM))
             .collect();
 
-        // Define descriptor binding for a single Fragment Shader Combined Image Sampler
+        let framebuffers: Vec<vk::Framebuffer> = swapchain_image_views
+            .iter()
+            .map(|&view| {
+                let fb_info = vk::FramebufferCreateInfo::default()
+                    .render_pass(render_pass)
+                    .attachments(std::slice::from_ref(&view))
+                    .width(swapchain_extent.width)
+                    .height(swapchain_extent.height)
+                    .layers(1);
+                unsafe { device.create_framebuffer(&fb_info, None).unwrap() }
+            })
+            .collect();
+
+        let pool_info = vk::CommandPoolCreateInfo::default().queue_family_index(0);
+        let command_pool = unsafe { device.create_command_pool(&pool_info, None).unwrap() };
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(framebuffers.len() as u32);
+        let command_buffers = unsafe { device.allocate_command_buffers(&alloc_info).unwrap() };
+
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let image_available_semaphore =
+            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
+        let render_finished_semaphore =
+            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
+        let in_flight_fence = unsafe {
+            device
+                .create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+                .unwrap()
+        };
+
+        Self {
+            _entry: entry,
+            instance,
+            device,
+            physical_device,
+            queue_family_index: 0,
+            graphics_queue,
+            render_node_or_gpu_device_handle,
+            surface_loader,
+            surface,
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_image_views,
+            swapchain_extent,
+            render_frames: vec![],
+            current_frame_index: 0,
+            render_pass,
+            descriptor_set_layout,
+            pipeline_layout,
+            graphics_pipeline,
+            framebuffers,
+            command_pool,
+            command_buffers,
+            image_available_semaphore,
+            render_finished_semaphore,
+            in_flight_fence,
+            texture_sampler,
+            descriptor_pool,
+            descriptor_set,
+            window_textures: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn init_headless(
+        width: u32,
+        height: u32,
+        allocator: &mut GbmAllocator<DrmDeviceFd>,
+    ) -> Self {
+        let render_node_or_gpu_device_handle = std::fs::metadata("/dev/dri/renderD128")
+            .map(|meta| meta.st_rdev())
+            .unwrap_or(0);
+        let instance_extensions = [
+            ash::khr::external_memory_capabilities::NAME.as_ptr(),
+            ash::khr::get_physical_device_properties2::NAME.as_ptr(),
+        ];
+        let device_extensions = [
+            ash::khr::external_memory::NAME.as_ptr(),
+            ash::khr::external_memory_fd::NAME.as_ptr(),
+            ash::ext::external_memory_dma_buf::NAME.as_ptr(),
+            ash::ext::image_drm_format_modifier::NAME.as_ptr(),
+        ];
+
+        let (entry, instance, physical_device, device, graphics_queue) = Self::create_core_device(
+            &instance_extensions,
+            &device_extensions,
+            render_node_or_gpu_device_handle,
+        );
+
+        let swapchain_extent = vk::Extent2D { width, height };
+
+        let (
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+            texture_sampler,
+            render_pass,
+            pipeline_layout,
+            graphics_pipeline,
+        ) = Self::create_pipeline_infrastructure(
+            &device,
+            swapchain_extent,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        // Headless manual allocation array loops logic continues here...
+        let mut render_frames = Vec::new();
+        let mut framebuffers = Vec::new();
+
+        use smithay::backend::allocator::Allocator;
+        use std::os::fd::AsRawFd;
+        use std::os::fd::IntoRawFd;
+
+        for _ in 0..2 {
+            let gbm_buffer = <GbmAllocator<DrmDeviceFd> as Allocator>::create_buffer(
+                allocator,
+                width,
+                height,
+                drm_fourcc::DrmFourcc::Xrgb8888,
+                &[drm_fourcc::DrmModifier::Linear],
+            )
+            .expect("Failed to allocate scanout plane via GBM");
+            let stride = gbm_buffer.stride();
+            let plane_layout = vk::SubresourceLayout {
+                row_pitch: stride as vk::DeviceSize,
+                ..Default::default()
+            };
+
+            let mut drm_modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+                .plane_layouts(std::slice::from_ref(&plane_layout));
+            let mut external_memory_info = vk::ExternalMemoryImageCreateInfo::default()
+                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+
+            let image_info = vk::ImageCreateInfo::default()
+                .push_next(&mut external_memory_info)
+                .push_next(&mut drm_modifier_info)
+                .image_type(vk::ImageType::TYPE_2D)
+                .extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .format(vk::Format::B8G8R8A8_UNORM)
+                .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
+            let image = unsafe { device.create_image(&image_info, None).unwrap() };
+
+            let dmabuf = gbm_buffer
+                .export()
+                .expect("Failed to export GBM buffer to Dmabuf");
+            let cloned_fd = unsafe {
+                std::os::fd::BorrowedFd::borrow_raw(dmabuf.handles().next().unwrap().as_raw_fd())
+            }
+            .try_clone_to_owned()
+            .unwrap()
+            .into_raw_fd();
+            let img_mem_reqs = unsafe { device.get_image_memory_requirements(image) };
+
+            let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                .fd(cloned_fd);
+            let mut dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo::default().image(image);
+            let mut alloc_flags_info = vk::MemoryAllocateFlagsInfo::default()
+                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+
+            let mem_properties =
+                unsafe { instance.get_physical_device_memory_properties(physical_device) };
+            let mem_index = (0..mem_properties.memory_type_count)
+                .find(|&i| (img_mem_reqs.memory_type_bits & (1 << i)) != 0)
+                .unwrap();
+
+            let memory_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(img_mem_reqs.size)
+                .memory_type_index(mem_index)
+                .push_next(&mut import_fd_info)
+                .push_next(&mut dedicated_alloc_info)
+                .push_next(&mut alloc_flags_info);
+            let memory = unsafe { device.allocate_memory(&memory_info, None).unwrap() };
+            unsafe {
+                device.bind_image_memory(image, memory, 0).unwrap();
+            }
+
+            let view = create_default_2d_image_view(&device, image, vk::Format::B8G8R8A8_UNORM);
+            let framebuffer = unsafe {
+                device
+                    .create_framebuffer(
+                        &vk::FramebufferCreateInfo::default()
+                            .render_pass(render_pass)
+                            .attachments(std::slice::from_ref(&view))
+                            .width(width)
+                            .height(height)
+                            .layers(1),
+                        None,
+                    )
+                    .unwrap()
+            };
+
+            framebuffers.push(framebuffer);
+            render_frames.push(GbmRenderFrame {
+                gbm_buffer,
+                image,
+                memory,
+                view,
+                framebuffer,
+            });
+        }
+
+        let command_pool = unsafe {
+            device
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default().queue_family_index(0),
+                    None,
+                )
+                .unwrap()
+        };
+        let command_buffers = unsafe {
+            device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(command_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(2),
+                )
+                .unwrap()
+        };
+        let in_flight_fence = unsafe {
+            device
+                .create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+                .unwrap()
+        };
+
+        Self {
+            _entry: entry,
+            instance,
+            device,
+            physical_device,
+            queue_family_index: 0,
+            graphics_queue,
+            render_node_or_gpu_device_handle,
+            surface_loader: unsafe { std::mem::zeroed() },
+            surface: vk::SurfaceKHR::null(),
+            swapchain_loader: unsafe { std::mem::zeroed() },
+            swapchain: vk::SwapchainKHR::null(),
+            swapchain_images: vec![],
+            swapchain_image_views: vec![],
+            swapchain_extent,
+            render_frames,
+            current_frame_index: 0,
+            render_pass,
+            descriptor_set_layout,
+            pipeline_layout,
+            graphics_pipeline,
+            framebuffers,
+            command_pool,
+            command_buffers,
+            image_available_semaphore: vk::Semaphore::null(),
+            render_finished_semaphore: vk::Semaphore::null(),
+            in_flight_fence,
+            texture_sampler,
+            descriptor_pool,
+            descriptor_set,
+            window_textures: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Step 1: Shared Core Instance and Device Setup
+    fn create_core_device(
+        instance_extensions: &[*const i8],
+        device_extensions: &[*const i8],
+        target_rdev: u64,
+    ) -> (Entry, Instance, vk::PhysicalDevice, Arc<Device>, vk::Queue) {
+        let entry = unsafe { Entry::load().expect("Failed to load Vulkan library") };
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(c"CDE Wayland Compositor")
+            .api_version(vk::API_VERSION_1_3);
+
+        let create_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .enabled_extension_names(instance_extensions);
+
+        let instance = unsafe {
+            entry
+                .create_instance(&create_info, None)
+                .expect("Failed to init instance")
+        };
+        let pdevices = unsafe { instance.enumerate_physical_devices().expect("No GPU found") };
+
+        // Match device with the hardware handle
+        let mut physical_device = pdevices[0];
+        for pdevice in pdevices {
+            let mut properties2 = vk::PhysicalDeviceProperties2::default();
+            let mut drm_properties = vk::PhysicalDeviceDrmPropertiesEXT::default();
+            properties2 = properties2.push_next(&mut drm_properties);
+
+            unsafe { instance.get_physical_device_properties2(pdevice, &mut properties2) };
+            let vulkan_rdev = ((drm_properties.primary_major as u64) << 8)
+                | (drm_properties.primary_minor as u64);
+
+            if vulkan_rdev == target_rdev {
+                println!(
+                    "Binding Vulkan logical instance directly onto discrete VRAM device node indices."
+                );
+                physical_device = pdevice;
+                break;
+            }
+        }
+
+        let queue_family_index = 0;
+        let queue_priorities = [1.0f32];
+        let queue_create_info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .queue_priorities(&queue_priorities);
+
+        let device_create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(std::slice::from_ref(&queue_create_info))
+            .enabled_extension_names(device_extensions);
+
+        let device = unsafe {
+            instance
+                .create_device(physical_device, &device_create_info, None)
+                .expect("Failed to instantiate logical Vulkan device")
+        };
+        let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+        (
+            entry,
+            instance,
+            physical_device,
+            Arc::new(device),
+            graphics_queue,
+        )
+    }
+
+    /// Step 2: Shared Pipeline & Descriptor Infrastructure Setup
+    fn create_pipeline_infrastructure(
+        device: &Device,
+        extent: vk::Extent2D,
+        final_image_layout: vk::ImageLayout,
+    ) -> (
+        vk::DescriptorSetLayout,
+        vk::DescriptorPool,
+        vk::DescriptorSet,
+        vk::Sampler,
+        vk::RenderPass,
+        vk::PipelineLayout,
+        vk::Pipeline,
+    ) {
         let sampler_layout_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -248,22 +578,17 @@ impl VulkanEngine {
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
             .bindings(std::slice::from_ref(&sampler_layout_binding));
-
         let descriptor_set_layout = unsafe {
             device
                 .create_descriptor_set_layout(&layout_info, None)
                 .unwrap()
         };
 
-        // Instantiate a Descriptor Pool to map allocation frames
         let pool_size = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            //.descriptor_count(1);
-            .descriptor_count(256); // Upgraded from 1 to 256 texture lines
+            .descriptor_count(256);
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(256) // Upgraded from 1 to 256 individual application frames
-            // Allows us to physically release descriptors back into the driver heap
-            // when application windows are dragged, closed, or resized!
+            .max_sets(256)
             .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
             .pool_sizes(std::slice::from_ref(&pool_size));
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None).unwrap() };
@@ -271,68 +596,47 @@ impl VulkanEngine {
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(std::slice::from_ref(&descriptor_set_layout));
-        let descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
-        let descriptor_set = descriptor_sets[0];
+        let descriptor_set = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap()[0] };
 
-        // Create a default texture Sampler to scale client windows linear filtering
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
-            //.address_mode_u(vk::SamplerAddressMode::REPEAT)
-            //.address_mode_v(vk::SamplerAddressMode::REPEAT)
-            //.address_mode_w(vk::SamplerAddressMode::REPEAT)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .anisotropy_enable(false)
-            .max_anisotropy(1.0)
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-            .unnormalized_coordinates(false)
-            .compare_enable(false)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR);
         let texture_sampler = unsafe { device.create_sampler(&sampler_info, None).unwrap() };
 
-        // Render Pass Configurations
         let color_attachment = vk::AttachmentDescription::default()
             .format(vk::Format::B8G8R8A8_UNORM)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+            .final_layout(final_image_layout);
 
         let color_attachment_ref = vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(std::slice::from_ref(&color_attachment_ref));
-
-        // Add a subpass dependency to ensure clear operations complete
-        // completely before geometry draw calls begin writing to the color attachments!
         let dependency = vk::SubpassDependency::default()
-            .src_subpass(vk::SUBPASS_EXTERNAL) // Outside the render pass timeline
-            .dst_subpass(0) // Target our primary drawing pass
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
             .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::empty())
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
 
         let render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(std::slice::from_ref(&color_attachment))
             .subpasses(std::slice::from_ref(&subpass))
-            // Bind the mandatory dependency barrier array
             .dependencies(std::slice::from_ref(&dependency));
-
         let render_pass = unsafe { device.create_render_pass(&render_pass_info, None).unwrap() };
 
-        // Load Shaders Compiled by build.rs
         let vert_spv = include_bytes!(concat!(env!("OUT_DIR"), "/cde_border.vert.spv"));
         let frag_spv = include_bytes!(concat!(env!("OUT_DIR"), "/cde_border.frag.spv"));
-
         let vert_code = ash::util::read_spv(&mut std::io::Cursor::new(&vert_spv[..])).unwrap();
         let frag_code = ash::util::read_spv(&mut std::io::Cursor::new(&frag_spv[..])).unwrap();
 
@@ -353,24 +657,18 @@ impl VulkanEngine {
                 .unwrap()
         };
 
-        // Configure Push Constants Layout
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .offset(0)
             .size(std::mem::size_of::<CdePushConstants>() as u32);
-
-        // Link both your descriptor set and push constants inside your pipeline layout
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .push_constant_ranges(std::slice::from_ref(&push_constant_range))
             .set_layouts(std::slice::from_ref(&descriptor_set_layout));
-
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .unwrap()
         };
 
-        // Full Graphics Pipeline Compilation
         let shader_stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
@@ -385,43 +683,31 @@ impl VulkanEngine {
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-
         let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain_extent.width as f32,
-            height: swapchain_extent.height as f32,
-            min_depth: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
             max_depth: 1.0,
+            ..Default::default()
         };
         let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain_extent,
+            extent,
+            ..Default::default()
         };
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewports(std::slice::from_ref(&viewport))
             .scissors(std::slice::from_ref(&scissor));
-
-        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-            .cull_mode(vk::CullModeFlags::NONE)
-            .line_width(1.0);
-
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default().line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
-            // Enable standard alpha channel blending for client transparency
             .blend_enable(true)
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-            .alpha_blend_op(vk::BlendOp::ADD);
-
+            .color_blend_op(vk::BlendOp::ADD);
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .attachments(std::slice::from_ref(&color_blend_attachment));
+
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&vertex_input_info)
@@ -431,90 +717,27 @@ impl VulkanEngine {
             .multisample_state(&multisample)
             .color_blend_state(&color_blending)
             .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
-        let graphics_pipelines = unsafe {
+            .render_pass(render_pass);
+        let graphics_pipeline = unsafe {
             device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-                .expect("Pipeline build failed")
+                .expect("Pipeline build failed")[0]
         };
-        let graphics_pipeline = graphics_pipelines[0];
-        // Clean up temporary module representations
+
         unsafe {
             device.destroy_shader_module(vert_module, None);
             device.destroy_shader_module(frag_module, None);
         }
-        // Framebuffer allocations
-        let framebuffers: Vec<vk::Framebuffer> = swapchain_image_views
-            .iter()
-            .map(|&view| {
-                let fb_info = vk::FramebufferCreateInfo::default()
-                    .render_pass(render_pass)
-                    .attachments(std::slice::from_ref(&view))
-                    .width(swapchain_extent.width)
-                    .height(swapchain_extent.height)
-                    .layers(1);
-                unsafe { device.create_framebuffer(&fb_info, None).unwrap() }
-            })
-            .collect();
-        // Command Buffer & Synced Primitives allocation
-        let pool_info = vk::CommandPoolCreateInfo::default().queue_family_index(queue_family_index);
-        let command_pool = unsafe { device.create_command_pool(&pool_info, None).unwrap() };
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(framebuffers.len() as u32);
-        let command_buffers = unsafe { device.allocate_command_buffers(&alloc_info).unwrap() };
-        let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let image_available_semaphore =
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
-        let render_finished_semaphore =
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
-        let in_flight_fence = unsafe { device.create_fence(&fence_info, None).unwrap() };
-        Self {
-            _entry: entry,
-            instance,
-            device: std::sync::Arc::new(device),
-            physical_device,
-            queue_family_index,
-            graphics_queue,
-            render_node_or_gpu_device_handle,
-            surface_loader,
-            surface,
-            swapchain_loader,
-            swapchain,
-            swapchain_images,
-            swapchain_image_views,
-            swapchain_extent,
-            render_frames: vec!(),
-            current_frame_index: 0,
-            render_pass,
-            descriptor_set_layout,
-            pipeline_layout,
-            graphics_pipeline,
-            framebuffers,
-            command_pool,
-            command_buffers,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
 
-            texture_sampler,
+        (
+            descriptor_set_layout,
             descriptor_pool,
             descriptor_set,
-
-            window_textures: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    pub fn init_headless(
-        width: u32,
-        height: u32,
-        allocator: &mut GbmAllocator<DrmDeviceFd>,
-    ) -> Self {
-        let entry = unsafe { Entry::load().expect("Failed to load Vulkan library") };
-        todo!("Final configuration variables wiring matches properties matching the fields above")
+            texture_sampler,
+            render_pass,
+            pipeline_layout,
+            graphics_pipeline,
+        )
     }
 
     /// Helper utility to allocate a descriptor set and link it to an image view.
