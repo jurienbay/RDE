@@ -775,15 +775,22 @@ impl VulkanEngine {
                 .allocation_size(img_mem_reqs.size)
                 .memory_type_index(img_mem_index);
 
-            // Dynamically chain the file descriptor if it's a DMABUF zero-copy import pathway
-            let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
-                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-            if let Some(fd) = import_fd { // Bind file descriptor directly to Vulkan Device Memory
-                import_fd_info = import_fd_info.fd(fd); // Hand the leaked raw descriptor over to Vulkan !
-                img_alloc_info = img_alloc_info.push_next(&mut import_fd_info);
-            }
+            let mut dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo::default().image(image);
+            img_alloc_info = img_alloc_info.push_next(&mut dedicated_alloc_info);
 
-            let memory = self.device.allocate_memory(&img_alloc_info, None).unwrap();
+            let memory = match import_fd {
+                Some(fd) => {
+                    let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
+                        .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                        .fd(fd);
+                    img_alloc_info = img_alloc_info.push_next(&mut import_fd_info);
+                    self.device.allocate_memory(&img_alloc_info, None).unwrap()
+                }
+                None => {
+                    self.device.allocate_memory(&img_alloc_info, None).unwrap()
+                }
+            };
+
             self.device.bind_image_memory(image, memory, 0).unwrap();
 
             memory
