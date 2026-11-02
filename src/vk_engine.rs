@@ -762,28 +762,37 @@ impl VulkanEngine {
     }
 
     /// Helper to queries requirements, allocates device-local GPU memory, and binds it to an image.
-    fn allocate_and_bind_image_memory(&self, image: vk::Image, import_fd: Option<i32>) -> vk::DeviceMemory {
+    fn allocate_and_bind_image_memory(&self, image: vk::Image,
+                                      import_fd: Option<i32>,
+                                      required_properties: vk::MemoryPropertyFlags) -> vk::DeviceMemory {
         unsafe {
             // Allocate device memory and bind to texture_image...
             // Look up the physical memory requirements for the destination GPU texture image
             let img_mem_reqs = self.device.get_image_memory_requirements(image);
             let img_mem_index = self.find_memory_type(
                 img_mem_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL, // Stored strictly in fast GPU VRAM pools
+                required_properties,
             );
             let mut img_alloc_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(img_mem_reqs.size)
                 .memory_type_index(img_mem_index);
 
-            // Dynamically chain the file descriptor if it's a DMABUF zero-copy import pathway
-            let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
-                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-            if let Some(fd) = import_fd { // Bind file descriptor directly to Vulkan Device Memory
-                import_fd_info = import_fd_info.fd(fd); // Hand the leaked raw descriptor over to Vulkan !
-                img_alloc_info = img_alloc_info.push_next(&mut import_fd_info);
-            }
+            let mut dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo::default().image(image);
+            img_alloc_info = img_alloc_info.push_next(&mut dedicated_alloc_info);
 
-            let memory = self.device.allocate_memory(&img_alloc_info, None).unwrap();
+            let memory = match import_fd {
+                Some(fd) => {
+                    let mut import_fd_info = vk::ImportMemoryFdInfoKHR::default()
+                        .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                        .fd(fd);
+                    img_alloc_info = img_alloc_info.push_next(&mut import_fd_info);
+                    self.device.allocate_memory(&img_alloc_info, None).unwrap()
+                }
+                None => {
+                    self.device.allocate_memory(&img_alloc_info, None).unwrap()
+                }
+            };
+
             self.device.bind_image_memory(image, memory, 0).unwrap();
 
             memory
@@ -1328,7 +1337,8 @@ impl VulkanEngine {
                     .sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .samples(vk::SampleCountFlags::TYPE_1);
                 let new_image = self.device.create_image(&image_info, None).unwrap();
-                let new_memory = self.allocate_and_bind_image_memory(new_image, None);
+                let new_memory = self.allocate_and_bind_image_memory(new_image, None,
+                                                                     vk::MemoryPropertyFlags::DEVICE_LOCAL); // Stored strictly in fast GPU VRAM pools
 
                 let new_view = create_default_2d_image_view(&self.device, new_image, vk::Format::B8G8R8A8_UNORM);
                 let new_descriptor_set = self.allocate_and_write_descriptor_set(new_view);
@@ -1532,7 +1542,7 @@ impl VulkanEngine {
             /////
 
             let imported_image = self.device.create_image(&image_info, None).unwrap();
-            let imported_memory = self.allocate_and_bind_image_memory(imported_image, Some(raw_fd));
+            let imported_memory = self.allocate_and_bind_image_memory(imported_image, Some(raw_fd), vk::MemoryPropertyFlags::empty());
 
             // Transition barrier for debug as the first frame seems to freeze until it gets
             // resized???
