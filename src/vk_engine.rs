@@ -382,8 +382,6 @@ impl VulkanEngine {
                 .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
                 .fd(cloned_fd);
             let mut dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo::default().image(image);
-            let mut alloc_flags_info = vk::MemoryAllocateFlagsInfo::default()
-                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
 
             let mem_properties =
                 unsafe { instance.get_physical_device_memory_properties(physical_device) };
@@ -395,8 +393,7 @@ impl VulkanEngine {
                 .allocation_size(img_mem_reqs.size)
                 .memory_type_index(mem_index)
                 .push_next(&mut import_fd_info)
-                .push_next(&mut dedicated_alloc_info)
-                .push_next(&mut alloc_flags_info);
+                .push_next(&mut dedicated_alloc_info);
             let memory = unsafe { device.allocate_memory(&memory_info, None).unwrap() };
             unsafe {
                 device.bind_image_memory(image, memory, 0).unwrap();
