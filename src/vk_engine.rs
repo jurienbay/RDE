@@ -9,6 +9,7 @@ use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::WinitGraphicsBackend;
 
+use std::mem::MaybeUninit;
 use std::os::fd::BorrowedFd;
 use std::os::linux::fs::MetadataExt;
 use std::sync::Arc;
@@ -76,7 +77,6 @@ pub struct VulkanEngine {
     pub render_node_or_gpu_device_handle: u64,
 
     // Window surface and swapchain
-    pub surface_loader: khr::surface::Instance,
     pub surface: vk::SurfaceKHR,
     pub swapchain_loader: khr::swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
@@ -165,7 +165,6 @@ impl VulkanEngine {
             ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
                 .expect("Failed to create window surface")
         };
-        let surface_loader = khr::surface::Instance::new(&entry, &instance);
         let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
 
         let inner_size = window_raw.inner_size();
@@ -256,7 +255,6 @@ impl VulkanEngine {
             queue_family_index: 0,
             graphics_queue,
             render_node_or_gpu_device_handle,
-            surface_loader,
             surface,
             swapchain_loader,
             swapchain,
@@ -459,8 +457,8 @@ impl VulkanEngine {
             queue_family_index: 0,
             graphics_queue,
             render_node_or_gpu_device_handle,
-            surface_loader: unsafe { std::mem::zeroed() },
             surface: vk::SurfaceKHR::null(),
+            //swapchain_loader: unsafe { MaybeUninit::<khr::surface::Instance>::zeroed() },
             swapchain_loader: unsafe { std::mem::zeroed() },
             swapchain: vk::SwapchainKHR::null(),
             swapchain_images: vec![],
@@ -823,7 +821,7 @@ impl VulkanEngine {
                 .swapchains(std::slice::from_ref(&self.swapchain))
                 .image_indices(std::slice::from_ref(&image_index));
 
-            let present_result = self.swapchain_loader.queue_present(self.graphics_queue, &present_info);
+            let present_result = self.swapchain_loader.queue_present(self.graphics_queue, &present_info); // XXX
             match present_result {
                 Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {}
                 Err(e) => panic!("Fatal presentation lane submission failure: {:?}", e),
