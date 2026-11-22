@@ -101,6 +101,19 @@ pub struct CdeCompositorState {
 }
 
 impl CdeCompositorState {
+    pub fn toggle_personality(&mut self) {
+        self.active_menu = None;
+        if self.personality.name() == "CDE" {
+            self.personality = &FvwmPersonality;
+        } else {
+            self.personality = &CdePersonality;
+            for win in &mut self.open_windows {
+                win.is_shaded = false;
+            }
+        }
+        println!("Switched desktop personality to: {}", self.personality.name());
+    }
+
     pub fn hits_any_window(&self, mx: f32, my: f32) -> bool {
         self.open_windows.iter().any(|w| {
             if w.workspace != self.active_workspace {
@@ -816,7 +829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if key_event.state() == KeyState::Pressed {
                         let key_code = key_event.key_code();
-                        //let modifiers = state.seat.get_keyboard().unwrap().modifier_state();
+                        let modifiers = state.seat.get_keyboard().unwrap().modifier_state();
 
                         /// When X11 was originally written, the developers needed to isolate
                         /// software applications from varying hardware protocols. To do this,
@@ -824,39 +837,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         /// keycode and add exactly 8 to it.
                         const X11_KKEY: u32 = 37u32 + 8u32;
                         const X11_UKEY: u32 = 22u32 + 8u32;
+                        const X11_MKEY: u32 = 50u32 + 8u32;
 
-                        // Check if Mod4 (Super/Windows key) is active
-                        //if modifiers.logo {
-                        // Switch from modifiers.logo to Ctrl + Alt to bypass GNOME's global intercepts
-                        //if modifiers.ctrl && modifiers.alt {
-                            // Super + L -> LOCK SESSIONS
-                            //if key_code == smithay::backend::input::Keycode::from(38_u32) {
-                            println!("🔒 Hotkey Activated: Ctrl+Alt pressed. {:?}", key_code);
-
+                        if modifiers.ctrl && modifiers.alt {
+                            println!("Hotkey Activated: Ctrl+Alt pressed. {:?}", key_code);
+                            if key_code == smithay::backend::input::Keycode::from(X11_MKEY) && !state.is_session_locked {
+                                state.toggle_personality();
+                                return; // Absorb hotkey so it doesn't type 'm' into the focused terminal
+                            }
                             // Ctrl + Alt + K -> LOCK SESSIONS (Changed to avoid WM conflicts)
-                            if key_code == smithay::backend::input::Keycode::from(X11_KKEY) {
-                                if !state.is_session_locked {
-                                    println!("🔒 Hotkey Activated: Super+L triggered! Locking compositor session.");
-                                    state.is_session_locked = true;
-                                    // Drop application window focus for security
-                                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                                    state.seat.get_keyboard().unwrap().set_focus(state, None, serial);
-                                    return; // Absorb event
-                                }
+                            if key_code == smithay::backend::input::Keycode::from(X11_KKEY) && !state.is_session_locked {
+                                println!("🔒 Hotkey Activated: Super+L triggered! Locking compositor session.");
+                                state.is_session_locked = true;
+                                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                                state.seat.get_keyboard().unwrap().set_focus(state, None, serial);
+                                return; // Absorb event
                             }
-
-                            // Super + Shift + U -> UNLOCK SEED FOR BACKDOOR TESTING
-                            //if modifiers.shift && key_code == smithay::backend::input::Keycode::from(22_u32) {
-
                             // Ctrl + Alt + U -> UNLOCK SEED FOR BACKDOOR TESTING (Scan code 22_u32)
-                            if key_code == smithay::backend::input::Keycode::from(X11_UKEY) {
-                                if state.is_session_locked {
-                                    println!("🔓 Backdoor Hotkey Activated: Super+Shift+U triggered! Restoring session.");
-                                    state.is_session_locked = false;
-                                    return; // Absorb event
-                                }
+                            if key_code == smithay::backend::input::Keycode::from(X11_UKEY) && state.is_session_locked {
+                                println!("🔓 Backdoor Hotkey Activated: Super+Shift+U triggered! Restoring session.");
+                                state.is_session_locked = false;
+                                return; // Absorb event
                             }
-                        //}
+                        }
                     }
                 }
                 // ----------------===========================================
