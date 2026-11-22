@@ -95,23 +95,6 @@ pub struct VulkanEngine {
     pub window_textures: std::sync::Mutex<std::collections::HashMap<u32, WindowTexture>>,
 }
 
-fn workspace_clear_colour(active_workspace: u32) -> [vk::ClearValue; 1] {
-    // Authentic 1996 CDE Room Palette Scheme Matrix
-    let background_color = match active_workspace {
-        0 => [0.00, 0.47, 0.47, 1.0], // Room One: Canonical Desktop Teal
-        1 => [0.40, 0.20, 0.30, 1.0], // Room Two: Classic Motif Maroon
-        2 => [0.25, 0.35, 0.45, 1.0], // Room Three: Workstation Slate Blue
-        3 => [0.30, 0.30, 0.35, 1.0], // Room Four: Unix Terminal Charcoal
-        _ => [0.00, 0.47, 0.47, 1.0], // Fallback
-    };
-    // Classic 1990s CDE Desktop Teal Clear color palette
-    [vk::ClearValue {
-        color: vk::ClearColorValue {
-            float32: background_color,
-        },
-    }]
-}
-
 fn find_pass_ortho_matrix(h: f32, w: f32, wx: f32, wy: f32) -> [f32; 16] {
     // Build the projection layout translation matrix factoring floating window offsets!
     [
@@ -602,7 +585,7 @@ impl VulkanEngine {
     }
 
     /// Helper utility to render a flat or procedurally chiseled UI frame (Lock box, icons, panels).
-    fn draw_procedural_ui_element(
+    pub(crate) fn draw_procedural_ui_element(
         &self,
         cmd_buf: vk::CommandBuffer,
         screen_h: f32,
@@ -663,7 +646,7 @@ impl VulkanEngine {
         is_session_locked: bool,
         password_length: u32,
         active_menu: Option<ActiveMenu>,
-        desktop_mode: DesktopMode,
+        personality: &dyn crate::personality::DesktopPersonality
     ) {
         unsafe {
             // Wait for previous GPU frames to complete
@@ -705,18 +688,12 @@ impl VulkanEngine {
                 .begin_command_buffer(cmd_buf, &vk::CommandBufferBeginInfo::default())
                 .unwrap();
 
-            let clear_values = match desktop_mode {
-                DesktopMode::Cde => {
-                    workspace_clear_colour(active_workspace)
-                }
-                DesktopMode::Fvwm => {
-                    [vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.18, 0.25, 0.28, 1.0],
-                        },
-                    }]
-                }
-            };
+            let clear_values = [vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: personality.clear_color(active_workspace),
+                },
+            }];
+
             let render_pass_begin_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass)
                 .framebuffer(self.framebuffers[image_index as usize])
@@ -895,60 +872,7 @@ impl VulkanEngine {
             }
 
             // Render CDE front panel desktop dock
-            match desktop_mode {
-                DesktopMode::Cde => {
-                    // Calculate bottom center positioning matching the current monitor resolution
-                    let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
-                    let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0; // Anchored 10 pixels above the absolute screen bottom
-                    // We encode the workspace selection into the higher bits of our integer flag!
-                    // is_focused = 2 tells the shader it's the panel.
-                    // Adding (active_workspace << 4) bundles the chosen desk index cleanly without extra push constant slots!
-                    // We pass `2` for the `is_focused` parameter. This special flag tells our fragment
-                    // shader: "This element is the Front Panel Dock—render interior button rows!"
-                    self.draw_procedural_ui_element(
-                        cmd_buf,
-                        screen_h, screen_w,
-                        (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
-                        2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
-                    );
-
-                    // Live FRONT PANEL Clock Text Overlay Pipeline
-                    // Position the clock text lane on the left side of the Switcher matrix
-                    let clock_w = 60.0;
-                    let clock_h = 16.0;
-                    let clock_x = panel_x + (CDE_PANEL_WIDTH / 2.0) - 130.0; // Pinned neatly to the left of the switcher
-                    let clock_y = panel_y + ((CDE_PANEL_HEIGHT - clock_h) / 2.0);
-
-                    let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
-                    let mut clock_chars = [0u32; 16];
-                    for (i, ch) in time_str.chars().take(16).enumerate() {
-                        clock_chars[i] = ch as u32;
-                    }
-
-                    let pass_matrix = find_pass_ortho_matrix(screen_h, screen_w, clock_x, clock_y);
-                    let clock_push_constants = CdePushConstants {
-                        mvp: pass_matrix,
-                        element_size: [clock_w, clock_h],
-                        is_focused: 6u32, // Tell the frag shader to render a clock
-                        is_dragging: 0u32,
-                        is_pressed: 0u32,
-                        title_chars: clock_chars, // Feed character tokens straight to shader
-                    };
-
-                    self.draw_element(cmd_buf, self.descriptor_set, clock_push_constants);
-                }
-                DesktopMode::Fvwm => {
-                    // Bottom-right FvwmPager container (shader flag 7 = FVWM Pager)
-                    let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
-                    let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
-                    self.draw_procedural_ui_element(
-                        cmd_buf,
-                        screen_h, screen_w,
-                        (pager_x, pager_y, FVWM_PAGER_WIDTH, FVWM_PAGER_HEIGHT),
-                        7u32 | (active_workspace << 4),
-                    );
-                }
-            }
+            personality.render_chrome(self, cmd_buf, screen_w, screen_h, active_workspace);
 
             // Render interactive CDE/FVWM procedural dropdown menu
             if let Some(menu) = active_menu {
@@ -982,6 +906,55 @@ impl VulkanEngine {
             self.device.end_command_buffer(cmd_buf).unwrap();
             self.submit_and_present_frame(cmd_buf, image_index);
         }
+    }
+
+    pub fn draw_cde_front_panel(
+        &self,
+        cmd_buf: vk::CommandBuffer,
+        screen_w: f32,
+        screen_h: f32,
+        active_workspace: u32,
+    ) {
+        // Calculate bottom center positioning matching the current monitor resolution
+        let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
+        let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0; // Anchored 10 pixels above the absolute screen bottom
+        // We encode the workspace selection into the higher bits of our integer flag!
+        // is_focused = 2 tells the shader it's the panel.
+        // Adding (active_workspace << 4) bundles the chosen desk index cleanly without extra push constant slots!
+        // We pass `2` for the `is_focused` parameter. This special flag tells our fragment
+        // shader: "This element is the Front Panel Dock—render interior button rows!"
+        self.draw_procedural_ui_element(
+            cmd_buf,
+            screen_h,
+            screen_w,
+            (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
+            2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
+        );
+    
+        // Live FRONT PANEL Clock Text Overlay Pipeline
+        // Position the clock text lane on the left side of the Switcher matrix
+        let clock_w = 60.0;
+        let clock_h = 16.0;
+        let clock_x = panel_x + (CDE_PANEL_WIDTH / 2.0) - 130.0; // Pinned neatly to the left of the switcher
+        let clock_y = panel_y + ((CDE_PANEL_HEIGHT - clock_h) / 2.0);
+    
+        let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
+        let mut clock_chars = [0u32; 16];
+        for (i, ch) in time_str.chars().take(16).enumerate() {
+            clock_chars[i] = ch as u32;
+        }
+    
+        let pass_matrix = find_pass_ortho_matrix(screen_h, screen_w, clock_x, clock_y);
+        let clock_push_constants = CdePushConstants {
+            mvp: pass_matrix,
+            element_size: [clock_w, clock_h],
+            is_focused: 6u32, // Tell the frag shader to render a clock
+            is_dragging: 0u32,
+            is_pressed: 0u32,
+            title_chars: clock_chars, // Feed character tokens straight to shader
+        };
+    
+        self.draw_element(cmd_buf, self.descriptor_set, clock_push_constants);
     }
 
     fn execute_one_time_commands<F>(&self, handler: F)

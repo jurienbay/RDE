@@ -7,7 +7,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 
 use smithay::backend::allocator::Buffer;
-use smithay::backend::winit::{self, WinitEvent};
+use smithay::backend::winit::WinitEvent;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
 use smithay::wayland::buffer::BufferHandler;
@@ -40,6 +40,13 @@ mod glsl;
 mod window_ctx;
 use window_ctx::*;
 
+mod personality;
+use personality::*;
+mod cde_personality;
+use cde_personality::CdePersonality;
+mod fvwm_personality;
+use fvwm_personality::FvwmPersonality;
+
 // Add an active drag state tracker enum
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GrabState {
@@ -63,7 +70,7 @@ pub enum GrabState {
 }
 
 pub struct CdeCompositorState {
-    pub desktop_mode: DesktopMode,
+    pub personality: &'static dyn DesktopPersonality,
     pub last_edge_pan: Option<std::time::Instant>,
     // XXX..
     pub display_handle: DisplayHandle,
@@ -91,6 +98,105 @@ pub struct CdeCompositorState {
     pub is_session_locked: bool,
     pub password_length: u32,
     pub secure_password_buffer: SecretBox<Vec<u8>>,
+}
+
+impl CdeCompositorState {
+    pub fn hits_any_window(&self, mx: f32, my: f32) -> bool {
+        self.open_windows.iter().any(|w| {
+            if w.workspace != self.active_workspace {
+                return false;
+            }
+            let (width, height) = if w.is_minimized {
+                (CDE_ICON_WIDTH, CDE_ICON_HEIGHT)
+            } else if w.is_shaded {
+                (w.width, CDE_TITLEBAR_HEIGHT)
+            } else {
+                (w.width, w.height)
+            };
+            mx >= w.x && mx <= (w.x + width) && my >= w.y && my <= (w.y + height)
+        })
+    }
+
+    pub fn open_root_apps_menu(&mut self, mx: f32, my: f32) {
+        self.active_menu = Some(ActiveMenu {
+            kind: MenuKind::RootApps,
+            window_id: 0,
+            x: mx,
+            y: my,
+            width: 120.0,
+            height: (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0,
+            item_count: 4,
+            row_labels: [[0u32; 8]; 4],
+            row_window_ids: [0u32; 4],
+        });
+    }
+
+    pub fn open_window_list_menu(&mut self, mx: f32, my: f32) {
+        let mut row_labels = [[0u32; 8]; 4];
+        let mut row_window_ids = [0u32; 4];
+        let count = self.open_windows.len().min(4);
+
+        for (i, win) in self.open_windows.iter().take(4).enumerate() {
+            row_window_ids[i] = win.id;
+            row_labels[i] = ActiveMenu::encode_label(&format!("WIN{}", win.id));
+        }
+        if count == 0 {
+            row_labels[0] = ActiveMenu::encode_label("NONE");
+        }
+
+        let item_count = count.max(1) as u32;
+        self.active_menu = Some(ActiveMenu {
+            kind: MenuKind::WindowList,
+            window_id: 0,
+            x: mx,
+            y: my,
+            width: 120.0,
+            height: (CDE_MENU_ROW_HEIGHT * item_count as f32) + 4.0,
+            item_count,
+            row_labels,
+            row_window_ids,
+        });
+    }
+
+    pub fn handle_cde_panel_click(&mut self, mx: f32, my: f32, socket_name: &str) -> bool {
+        let screen_w = self.vulkan_engine.swapchain_extent.width as f32;
+        let screen_h = self.vulkan_engine.swapchain_extent.height as f32;
+        let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
+        let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0;
+
+        if mx < panel_x || mx > (panel_x + CDE_PANEL_WIDTH)
+            || my < panel_y || my > (panel_y + CDE_PANEL_HEIGHT)
+        {
+            return false;
+        }
+
+        let switch_left = panel_x + (CDE_PANEL_WIDTH / 2.0) - 50.0;
+        let switch_right = panel_x + (CDE_PANEL_WIDTH / 2.0) + 50.0;
+        let switch_top = panel_y + 8.0;
+        let switch_bottom = panel_y + CDE_PANEL_HEIGHT - 8.0;
+
+        if mx >= switch_left && mx <= switch_right && my >= switch_top && my <= switch_bottom {
+            let eth = 2.0;
+            let col_w = ((switch_right - switch_left) - (eth * 2.0)) / 2.0;
+            let row_h = ((switch_bottom - switch_top) - (eth * 2.0)) / 2.0;
+            let col_idx = (((mx - switch_left - eth) / col_w).floor() as i32).clamp(0, 1);
+            let row_idx = (((my - switch_top - eth) / row_h).floor() as i32).clamp(0, 1);
+            self.active_workspace = ((row_idx * 2) + col_idx) as u32;
+        } else {
+            let local_x = mx - panel_x;
+            let local_y = my - panel_y;
+            if local_x >= 20.0 && local_x <= 64.0 && local_y >= 10.0 && local_y <= 54.0 {
+                let _ = std::process::Command::new("foot")
+                    .env("WAYLAND_DISPLAY", socket_name)
+                    .spawn();
+            } else if local_x >= 536.0 && local_x <= 580.0 && local_y >= 10.0 && local_y <= 54.0 {
+                let _ = std::process::Command::new("pcmanfm")
+                    .env("WAYLAND_DISPLAY", socket_name)
+                    .spawn();
+            }
+        }
+        true
+    }
 }
 
 smithay::delegate_data_device!(CdeCompositorState);
@@ -546,10 +652,10 @@ fn verify_current_user_inline_secure(secure_password: &SecretBox<Vec<u8>>) -> bo
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let is_nested = args.contains(&"--nested".to_string());
-    let desktop_mode = if args.contains(&"--fvwm".to_string()) {
-        DesktopMode::Fvwm
+    let personality: &'static dyn DesktopPersonality = if args.contains(&"--fvwm".to_string()) {
+        &FvwmPersonality
     } else {
-        DesktopMode::Cde
+        &CdePersonality
     };
 
     let mut event_loop = EventLoop::<CdeCompositorState>::try_new()?;
@@ -833,40 +939,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.pointer_location = (location.x, location.y);
 
                         // FVWM Mode: Sloppy Focus & Edge Panning across 2x2 Grid
-                        if state.desktop_mode == DesktopMode::Fvwm && state.current_grab == GrabState::Idle {
+                        if state.current_grab == GrabState::Idle {
                             let mx = location.x as f32;
                             let my = location.y as f32;
                             let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
                             let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
 
-                            // Sloppy Focus: Focus topmost window under cursor without raising it
-                            if let Some(hovered_win) = state.open_windows.iter().rev().find(|w| {
-                                w.workspace == state.active_workspace && !w.is_minimized &&
-                                mx >= w.x && mx <= (w.x + w.width) &&
-                                my >= w.y && my <= (w.y + if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height })
-                            }) {
-                                let target_surface = hovered_win.toplevel.wl_surface().clone();
-                                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                                state.seat.get_keyboard().unwrap().set_focus(state, Some(target_surface), serial);
-                            }
+                            state.personality.on_pointer_hover(state, mx, my);
 
-                            // Edge Panning: Flip across the 2x2 workspace grid when hitting screen edges
-                            let can_pan = state.last_edge_pan.map_or(true, |t| t.elapsed().as_millis() > FVWM_EDGE_PAN_COOLDOWN_MS);
-                            if can_pan {
-                                let mut col = (state.active_workspace % 2) as i32;
-                                let mut row = (state.active_workspace / 2) as i32;
-                                let mut panned = false;
-
-                                if mx <= 1.0 && col > 0 { col -= 1; panned = true; }
-                                else if mx >= screen_w - 2.0 && col < 1 { col += 1; panned = true; }
-                                else if my <= 1.0 && row > 0 { row -= 1; panned = true; }
-                                else if my >= screen_h - 2.0 && row < 1 { row += 1; panned = true; }
-
-                                if panned {
-                                    state.active_workspace = ((row * 2) + col) as u32;
-                                    state.last_edge_pan = Some(std::time::Instant::now());
-                                    println!("FVWM EdgeScroll: Panned to page ({}, {}) [Workspace {}]", col, row, state.active_workspace);
-                                }
+                            if mx <= 1.0 {
+                                state.personality.on_edge_hit(state, ScreenEdge::Left);
+                            } else if mx >= screen_w - 2.0 {
+                                state.personality.on_edge_hit(state, ScreenEdge::Right);
+                            } else if my <= 1.0 {
+                                state.personality.on_edge_hit(state, ScreenEdge::Top);
+                            } else if my >= screen_h - 2.0 {
+                                state.personality.on_edge_hit(state, ScreenEdge::Bottom);
                             }
                         }
 
@@ -971,87 +1059,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             },
                         );
 
-                        if event.button() == Some(MouseButton::Right) && button_state == ButtonState::Pressed {
-                            let mx = state.pointer_location.0 as f32;
-                            let my = state.pointer_location.1 as f32;
+                        let mx = state.pointer_location.0 as f32;
+                        let my = state.pointer_location.1 as f32;
 
-                            // Search if right-click intersects any open app window on the active desk layout pane
-                            let hit_a_window = state.open_windows.iter().any(|w| {
-                                let effective_h = if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height };
-                                w.workspace == state.active_workspace && !w.is_minimized &&
-                                mx >= w.x && mx <= (w.x + w.width) &&
-                                my >= w.y && my <= (w.y + effective_h)
-                            });
-
-                            if !hit_a_window {
-                                println!("CDE Root Menu: Right-clicked background canvas! Spawning global workspace selection menu.");
-
-                                let menu_w = 120.0;
-                                let menu_h = (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0; // 84.0px total box profile height
-
-                                state.active_menu = Some(ActiveMenu {
-                                    kind: MenuKind::RootApps,
-                                    window_id: 0, // Window ID 0 signals a static root background panel assignment menu
-                                    x: mx,
-                                    y: my,
-                                    width: menu_w,
-                                    height: menu_h,
-                                    item_count: 4,
-                                    row_labels: [[0u32; 8]; 4],
-                                    row_window_ids: [0u32; 4],
-                                });
-                                return; // Intercepted: absorb right-click sequence step completely
-                            }
-                        }
-
-                        let is_root_canvas = |state: &CdeCompositorState, mx: f32, my: f32| -> bool {
-                            let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
-                            let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
-                            if state.desktop_mode == DesktopMode::Fvwm {
-                                let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
-                                let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
-                                if mx >= pager_x && mx <= (pager_x + FVWM_PAGER_WIDTH) &&
-                                   my >= pager_y && my <= (pager_y + FVWM_PAGER_HEIGHT) {
-                                    return false;
+                        if button_state == ButtonState::Pressed {
+                            if let Some(button) = event.button() {
+                                if state.active_menu.is_none() && state.personality.is_root_canvas(state, mx, my) {
+                                    state.personality.on_root_click(state, button, mx, my);
+                                    return;
                                 }
-                            }
-                            !state.open_windows.iter().any(|w| {
-                                let h = if w.is_minimized { CDE_ICON_HEIGHT } else if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height };
-                                let width = if w.is_minimized { CDE_ICON_WIDTH } else { w.width };
-                                w.workspace == state.active_workspace &&
-                                mx >= w.x && mx <= (w.x + width) && my >= w.y && my <= (my + h)
-                            })
-                        };
-
-                        if state.desktop_mode == DesktopMode::Fvwm && event.button() == Some(MouseButton::Middle) && button_state == ButtonState::Pressed {
-                            let mx = state.pointer_location.0 as f32;
-                            let my = state.pointer_location.1 as f32;
-                            if is_root_canvas(state, mx, my) {
-                                let mut row_labels = [[0u32; 8]; 4];
-                                let mut row_window_ids = [0u32; 4];
-                                let count = state.open_windows.len().min(4);
-
-                                for (i, win) in state.open_windows.iter().take(4).enumerate() {
-                                    row_window_ids[i] = win.id;
-                                    row_labels[i] = ActiveMenu::encode_label(&format!("WIN{}", win.id));
-                                }
-                                if count == 0 {
-                                    row_labels[0] = ActiveMenu::encode_label("NONE");
-                                }
-
-                                let item_count = count.max(1) as u32;
-                                state.active_menu = Some(ActiveMenu {
-                                    kind: MenuKind::WindowList,
-                                    window_id: 0,
-                                    x: mx,
-                                    y: my,
-                                    width: 120.0,
-                                    height: (CDE_MENU_ROW_HEIGHT * item_count as f32) + 4.0,
-                                    item_count,
-                                    row_labels,
-                                    row_window_ids,
-                                });
-                                return;
                             }
                         }
 
@@ -1158,115 +1174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
 
-                                    if state.desktop_mode == DesktopMode::Fvwm && is_root_canvas(state, mx, my) {
-                                        state.active_menu = Some(ActiveMenu {
-                                            kind: MenuKind::RootApps,
-                                            window_id: 0,
-                                            x: mx,
-                                            y: my,
-                                            width: 120.0,
-                                            height: (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0,
-                                            item_count: 4,
-                                            row_labels: [[0u32; 8]; 4],
-                                            row_window_ids: [0; 4],
-                                        });
+                                    if state.personality.on_chrome_click(state, mx, my, &closure_socket_name) {
                                         return;
-                                    }
-
-                                    // Get current screen window dimensions from the Vulkan swapchain context
-                                    let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
-                                    let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
-
-                                    if state.desktop_mode == DesktopMode::Fvwm {
-                                        // FVWM PAGER INTERACTION INTERCEPTOR (Bottom-Right Corner)
-                                        let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
-                                        let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
-
-                                        if mx >= pager_x && mx <= (pager_x + FVWM_PAGER_WIDTH) &&
-                                           my >= pager_y && my <= (pager_y + FVWM_PAGER_HEIGHT) {
-                                            let col = (((mx - pager_x) / (FVWM_PAGER_WIDTH / 2.0)).floor() as u32).clamp(0, 1);
-                                            let row = (((my - pager_y) / (FVWM_PAGER_HEIGHT / 2.0)).floor() as u32).clamp(0, 1);
-                                            state.active_workspace = (row * 2) + col;
-                                            println!("FVWM Pager: Switched to Page ({}, {}) [Workspace {}]", col, row, state.active_workspace);
-                                            return;
-                                        }
-                                    } else {
-                                        // Replicate the exact Front Panel metrics from vk_engine.rs
-                                        let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
-                                        let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0;
-
-                                        // FRONT PANEL DOCK INTERACTION INTERCEPTOR.
-                                        if mx >= panel_x && mx <= (panel_x + CDE_PANEL_WIDTH) &&
-                                           my >= panel_y && my <= (panel_y + CDE_PANEL_HEIGHT) {
-
-                                            // Calculate boundaries for the central Workspace Switcher box
-                                            let switch_left = panel_x + (CDE_PANEL_WIDTH / 2.0) - 50.0;
-                                            let switch_right = panel_x + (CDE_PANEL_WIDTH / 2.0) + 50.0;
-                                            let switch_top = panel_y + 8.0;
-                                            let switch_bottom = panel_y + CDE_PANEL_HEIGHT - 8.0;
-
-                                            if mx >= switch_left && mx <= switch_right &&
-                                               my >= switch_top && my <= switch_bottom {
-
-                                                let bx = mx - switch_left;
-                                                let by = my - switch_top;
-                                                let eth = 2.0;
-
-                                                let bw = switch_right - switch_left;
-                                                let bh = switch_bottom - switch_top;
-
-                                                let inner_bw = bw - (eth * 2.0);
-                                                let inner_bh = bh - (eth * 2.0);
-
-                                                // Calculate cell column and row sizes
-                                                let col_w = inner_bw / 2.0;
-                                                let row_h = inner_bh / 2.0;
-
-                                                let local_x = bx - eth;
-                                                let local_y = by - eth;
-
-                                                let col_idx = (local_x / col_w).floor() as i32;
-                                                let row_idx = (local_y / row_h).floor() as i32;
-
-                                                // Clamp cell coordinates
-                                                let col_idx = col_idx.clamp(0, 1);
-                                                let row_idx = row_idx.clamp(0, 1);
-
-                                                // Resolve total grid target room index
-                                                let clicked_workspace = (row_idx * 2) + col_idx;
-
-                                                if clicked_workspace >= 0 && clicked_workspace < 4 {
-                                                    println!("Stacked Quad CDE Switcher: Switch to Room [{}]", clicked_workspace + 1);
-                                                    state.active_workspace = clicked_workspace as u32;
-                                                }
-                                            } else {
-                                                // Calculate exact coordinates relative to the panel's left edge layout bounds
-                                                let panel_local_x = mx - panel_x;
-                                                let panel_local_y = my - panel_y;
-
-                                                // Matches shader button boundaries: left=20.0, right=64.0, top=10.0, bottom=54.0
-                                                // Left Button Bounds: 20.0 to 64.0
-                                                if panel_local_x >= 20.0 && panel_local_x <= 64.0 &&
-                                                   panel_local_y >= 10.0 && panel_local_y <= 54.0 {
-                                                // User clicked on the wings of the front panel dock!
-                                                // Let's implement an absolute launch action if they clicked the left wing area.
-                                                //if mx < switch_left {
-                                                    println!("CDE Shortcut Activated: Spawning Retro Terminal Console Application.");
-                                                    std::process::Command::new("foot")
-                                                        .env("WAYLAND_DISPLAY", &closure_socket_name) // Inject live engine display socket!
-                                                        .spawn().expect("Failed to execute client process thread");
-                                                } else if panel_local_x >= 536.0 && panel_local_x <= 580.0 &&
-                                                          panel_local_y >= 10.0 && panel_local_y <= 54.0 {
-                                                    // Right Button Bounds (600.0 - 64.0 = 536.0, and 600.0 - 20.0 = 580.0) TODO Use constants!
-                                                    println!("CDE Trash Clicked: Spawning File Manager.");
-                                                    // You can replace "pcmanfm" with "nautilus", "thunar", or a custom terminal runner
-                                                    std::process::Command::new("pcmanfm")
-                                                        .env("WAYLAND_DISPLAY", &closure_socket_name) // Inject live engine display socket!
-                                                        .spawn().expect("Failed to execute file manager client shortcut process");
-                                                }
-                                            }
-                                            return; // Intercepted: skip trailing window tests entirely!
-                                        }
                                     }
 
                                     // Locate which window was clicked under Z-order stacking rules
@@ -1361,19 +1270,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 // Only allow window dragging if the user clicks inside the titlebar area
                                                 // (between top of window and TITLEBAR_HEIGHT)
                                                 if my <= (window.y + CDE_TITLEBAR_HEIGHT) {
-                                                    if state.desktop_mode == DesktopMode::Fvwm {
-                                                        let now = std::time::Instant::now();
-                                                        let is_double_click = state.last_clicked_window_id == Some(window.id) &&
-                                                            state.last_click_timestamp.map_or(false, |t| now.duration_since(t).as_millis() < 250);
+                                                    let now = std::time::Instant::now();
+                                                    let is_double_click = state.last_clicked_window_id == Some(window.id)
+                                                        && state.last_click_timestamp.map_or(false, |t| now.duration_since(t).as_millis() < 250);
 
-                                                        state.last_clicked_window_id = Some(window.id);
-                                                        state.last_click_timestamp = Some(now);
+                                                    state.last_clicked_window_id = Some(window.id);
+                                                    state.last_click_timestamp = Some(now);
 
-                                                        if is_double_click {
-                                                            state.open_windows[index].is_shaded = !state.open_windows[index].is_shaded;
-                                                            closed_a_window = true;
-                                                            break;
-                                                        }
+                                                    if is_double_click && state.personality.on_titlebar_double_click(state, index) {
+                                                        closed_a_window = true;
+                                                        break;
                                                     }
                                                     hit_window = Some(index);
                                                 } else if let Some(edge) = window.get_resize_edge(mx, my) {
@@ -1666,7 +1572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.is_session_locked,
                     state.password_length,
                     state.active_menu,
-                    state.desktop_mode,
+                    state.personality,
                 );
                 winit_backend.bind().unwrap();
             }
@@ -1676,7 +1582,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } // xXX
 
     let mut state = CdeCompositorState {
-        desktop_mode,
+        personality,
         last_edge_pan: None,
         // XXX
         display_handle: display_handle,
@@ -1734,7 +1640,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.is_session_locked,
             state.password_length,
             state.active_menu,
-            state.desktop_mode,
+            state.personality,
         );
 
         // Natively drain and parse incoming client data on the thread context directly!
