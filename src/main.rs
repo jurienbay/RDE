@@ -990,14 +990,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let menu_h = (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0; // 84.0px total box profile height
 
                                 state.active_menu = Some(ActiveMenu {
+                                    kind: MenuKind::RootApps,
                                     window_id: 0, // Window ID 0 signals a static root background panel assignment menu
                                     x: mx,
                                     y: my,
                                     width: menu_w,
                                     height: menu_h,
                                     item_count: 4,
+                                    row_labels: [[0u32; 8]; 4],
+                                    row_window_ids: [0u32; 4],
                                 });
                                 return; // Intercepted: absorb right-click sequence step completely
+                            }
+                        }
+
+                        let is_root_canvas = |state: &CdeCompositorState, mx: f32, my: f32| -> bool {
+                            let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
+                            let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
+                            if state.desktop_mode == DesktopMode::Fvwm {
+                                let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
+                                let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
+                                if mx >= pager_x && mx <= (pager_x + FVWM_PAGER_WIDTH) &&
+                                   my >= pager_y && my <= (pager_y + FVWM_PAGER_HEIGHT) {
+                                    return false;
+                                }
+                            }
+                            !state.open_windows.iter().any(|w| {
+                                let h = if w.is_minimized { CDE_ICON_HEIGHT } else if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height };
+                                let width = if w.is_minimized { CDE_ICON_WIDTH } else { w.width };
+                                w.workspace == state.active_workspace &&
+                                mx >= w.x && mx <= (w.x + width) && my >= w.y && my <= (my + h)
+                            })
+                        };
+
+                        if state.desktop_mode == DesktopMode::Fvwm && event.button() == Some(MouseButton::Middle) && button_state == ButtonState::Pressed {
+                            let mx = state.pointer_location.0 as f32;
+                            let my = state.pointer_location.1 as f32;
+                            if is_root_canvas(state, mx, my) {
+                                let mut row_labels = [[0u32; 8]; 4];
+                                let mut row_window_ids = [0u32; 4];
+                                let count = state.open_windows.len().min(4);
+
+                                for (i, win) in state.open_windows.iter().take(4).enumerate() {
+                                    row_window_ids[i] = win.id;
+                                    row_labels[i] = ActiveMenu::encode_label(&format!("WIN{}", win.id));
+                                }
+                                if count == 0 {
+                                    row_labels[0] = ActiveMenu::encode_label("NONE");
+                                }
+
+                                let item_count = count.max(1) as u32;
+                                state.active_menu = Some(ActiveMenu {
+                                    kind: MenuKind::WindowList,
+                                    window_id: 0,
+                                    x: mx,
+                                    y: my,
+                                    width: 120.0,
+                                    height: (CDE_MENU_ROW_HEIGHT * item_count as f32) + 4.0,
+                                    item_count,
+                                    row_labels,
+                                    row_window_ids,
+                                });
+                                return;
                             }
                         }
 
@@ -1018,8 +1072,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                             println!("CDE Menu Hook: Clicked Row Index [{}] on Window ID {}", clicked_row, menu.window_id);
 
-                                            if let Some(w_idx) = state.open_windows.iter().position(|w| w.id == menu.window_id) {
-                                                if menu.window_id == 0 {
+                                            match menu.kind {
+                                                MenuKind::RootApps => {
                                                     // Workspace Root Menu Selection Actions
                                                     match clicked_row {
                                                         CDE_ROOT_MENU_ITEM_TERMINAL => {
@@ -1044,51 +1098,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         }
                                                         _ => {} // Cancel row simply dismisses the popup window panel
                                                     }
-                                                    state.active_menu = None;
-                                                    return;
-                                                } else {
-                                                    match clicked_row {
-                                                        CDE_MENU_ITEM_RESTORE => {
-                                                            let win = &mut state.open_windows[w_idx];
-                                                            if win.is_minimized {
-                                                                println!("CDE Layout Engine: Restoring Window ID {} from icon state", menu.window_id);
-                                                                win.is_minimized = false;
+                                                }
+                                                MenuKind::WindowList => {
+                                                    if let Some(&target_id) = menu.row_window_ids.get(clicked_row as usize) {
+                                                        if let Some(w_idx) = state.open_windows.iter().position(|w| w.id == target_id) {
+                                                            state.open_windows[w_idx].is_minimized = false;
+                                                            state.open_windows[w_idx].is_shaded = false;
+                                                            state.active_workspace = state.open_windows[w_idx].workspace;
 
-                                                                // Restore its 700x500 geometry mapping boundaries
-                                                                win.width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
-                                                                win.height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
-
-                                                                win.toplevel.with_pending_state(|xdg_state| {
-                                                                    xdg_state.size = Some((700, 500).into());
-                                                                });
-                                                                win.toplevel.send_pending_configure();
+                                                            let win = state.open_windows.remove(w_idx);
+                                                            let surf = win.toplevel.wl_surface().clone();
+                                                            state.open_windows.push(win);
+                                                            state.seat.get_keyboard().unwrap().set_focus(state, Some(surf), serial);
+                                                        }
+                                                    }
+                                                }
+                                                MenuKind::WindowOps => {
+                                                    if let Some(w_idx) = state.open_windows.iter().position(|w| w.id == menu.window_id) {
+                                                        match clicked_row {
+                                                            CDE_MENU_ITEM_RESTORE => {
+                                                                let win = &mut state.open_windows[w_idx];
+                                                                if win.is_minimized {
+                                                                    println!("CDE Layout Engine: Restoring Window ID {} from icon state", menu.window_id);
+                                                                    win.is_minimized = false;
+                                                                    win.width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
+                                                                    win.height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
+                                                                    win.toplevel.with_pending_state(|xdg_state| {
+                                                                        xdg_state.size = Some((700, 500).into());
+                                                                    });
+                                                                    win.toplevel.send_pending_configure();
+                                                                }
                                                             }
-                                                        }
-                                                        CDE_MENU_ITEM_MINIMIZE => {
-                                                            // Fallback into your existing button_type 2 minimization queue
-                                                            state.current_grab = GrabState::ButtonPressed { window_index: w_idx, button_type: 2 };
-                                                        }
-                                                        CDE_MENU_ITEM_LOWER => {
-                                                            // Lower: Shift target window to index 0 (absolute bottom of Z-stack)
-                                                            let target_win = state.open_windows.remove(w_idx);
-                                                            state.open_windows.insert(0, target_win);
-                                                            println!("CDE Layout Engine: Lowered Window Context ID {} to base of Z-stack.", menu.window_id);
-                                                        }
-                                                        CDE_MENU_ITEM_CLOSE => {
-                                                            if let Some(window) = state.open_windows.get(w_idx) {
-                                                                window.toplevel.send_close();
+                                                            CDE_MENU_ITEM_MINIMIZE => {
+                                                                // Fallback into your existing button_type 2 minimization queue
+                                                                state.current_grab = GrabState::ButtonPressed { window_index: w_idx, button_type: 2 };
                                                             }
+                                                            CDE_MENU_ITEM_LOWER => {
+                                                                // Lower: Shift target window to index 0 (absolute bottom of Z-stack)
+                                                                let target_win = state.open_windows.remove(w_idx);
+                                                                state.open_windows.insert(0, target_win);
+                                                                println!("CDE Layout Engine: Lowered Window Context ID {} to base of Z-stack.", menu.window_id);
+                                                            }
+                                                            CDE_MENU_ITEM_CLOSE => {
+                                                                if let Some(window) = state.open_windows.get(w_idx) {
+                                                                    window.toplevel.send_close();
+                                                                }
+                                                            }
+                                                            _ => {} // Restore/Size placeholder steps
                                                         }
-                                                        _ => {} // Restore/Size placeholder steps
                                                     }
                                                 }
                                             }
+                                            //  Dismiss the menu both after clicking an option and when clicking outside the menu.
                                             state.active_menu = None; // Dimiss menu after an item is clicked
                                             return; // Intercepted: absorb click sequence step completely
                                         } else {
                                             // Clicked completely outside the active dropdown: Dismiss it instantly
                                             state.active_menu = None;
                                         }
+                                    }
+
+                                    if state.desktop_mode == DesktopMode::Fvwm && is_root_canvas(state, mx, my) {
+                                        state.active_menu = Some(ActiveMenu {
+                                            kind: MenuKind::RootApps,
+                                            window_id: 0,
+                                            x: mx,
+                                            y: my,
+                                            width: 120.0,
+                                            height: (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0,
+                                            item_count: 4,
+                                            row_labels: [[0u32; 8]; 4],
+                                            row_window_ids: [0; 4],
+                                        });
+                                        return;
                                     }
 
                                     // Get current screen window dimensions from the Vulkan swapchain context
@@ -1393,12 +1475,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let menu_h = CDE_MENU_ROW_HEIGHT * 4.0; // 4 active action rows
 
                                                     state.active_menu = Some(ActiveMenu {
+                                                        kind: MenuKind::WindowOps,
                                                         window_id: window.id,
                                                         x: window.x + CDE_BORDER_WIDTH,
                                                         y: window.y + CDE_TITLEBAR_HEIGHT,
                                                         width: menu_w,
                                                         height: menu_h,
                                                         item_count: 4,
+                                                        row_labels: [[0u32; 8]; 4],
+                                                        row_window_ids: [0u32; 4],
                                                     });
                                                 }
                                                 _ => {}
@@ -1423,6 +1508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let menu_h = (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0;
 
                                                 state.active_menu = Some(ActiveMenu {
+                                                    kind: MenuKind::RootApps,
                                                     window_id: window.id,
                                                     // Spawn the menu directly above or next to the icon box bounds
                                                     x: window.x,
@@ -1430,6 +1516,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     width: menu_w,
                                                     height: menu_h,
                                                     item_count: 4,
+                                                    row_labels: [[0u32; 8]; 4],
+                                                    row_window_ids: [0u32; 4],
                                                 });
                                             }
                                         }

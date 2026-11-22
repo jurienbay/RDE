@@ -16,14 +16,24 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    WindowOps,
+    RootApps,
+    WindowList,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ActiveMenu {
+    pub kind: MenuKind,
     pub window_id: u32, // The application window this menu is acting upon
     pub x: f32,         // Screen coordinates where the menu box stands
     pub y: f32,
     pub width: f32,
     pub height: f32,
     pub item_count: u32,
+    pub row_labels: [[u32; 8]; 4], // Up to 4 rows, 8 ASCII chars each
+    pub row_window_ids: [u32; 4],  // Maps each row to a target window ID for WindowList
 }
 
 // Structural context representing a single floating CDE application window
@@ -72,5 +82,15 @@ impl WindowContext {
         if is_bottom { return Some(ResizeEdge::Bottom); }
 
         None
+    }
+}
+
+impl ActiveMenu {
+    pub fn encode_label(s: &str) -> [u32; 8] {
+        let mut buf = [0u32; 8];
+        for (i, ch) in s.to_ascii_uppercase().chars().take(8).enumerate() {
+            buf[i] = ch as u32;
+        }
+        buf
     }
 }

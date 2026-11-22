@@ -474,7 +474,7 @@ void main() {
         }
 	////
 
-	// is_focused == 5 -> RENDER PROCEDURAL CDE DROPDOWN MENU
+    // is_focused == 5 -> RENDER PROCEDURAL CDE / FVWM DROPDOWN MENU
 	if (push.is_focused == 5u) {
 	    float local_x = inPixelPos.x;
 	    float local_y_pos = push.element_size.y - inPixelPos.y;
@@ -492,10 +492,11 @@ void main() {
 
 	    // Procedural horizontal row partition lanes (20.0px segments)
 	    float row_height = 20.0;
+	    float max_rows = float(push.is_dragging); // item_count passed via is_dragging
 	    float adjusted_y = local_y_pos - border_thickness;
 
-	    if (adjusted_y >= 0.0 && adjusted_y < (row_height * 4.0)) {
-	        float row_index = 3.0 - floor(adjusted_y / row_height);
+	    if (adjusted_y >= 0.0 && adjusted_y < (row_height * max_rows)) {
+	        float row_index = (max_rows - 1.0) - floor(adjusted_y / row_height);
 	        float local_y = mod(adjusted_y, row_height);
 
 	        // Carve out sharp 1px chiseled separator grooves between menu entries
@@ -505,8 +506,9 @@ void main() {
 	            color = vec3(0.95, 0.95, 0.95); // Groove highlight line
 	        }
 
-	        // Highlight the destructive Close zone locked perfectly inside row index 3
-	        if (row_index == 3.0 && local_y > 1.0 && local_y < row_height - 1.0) {
+	        // Highlight bottom row on 4-item menus (Close / Cancel)
+	        bool is_bottom_action = (max_rows == 4.0 && row_index == 3.0);
+	        if (is_bottom_action && local_y > 1.0 && local_y < row_height - 1.0) {
 	            color = vec3(0.58, 0.58, 0.58); // Dark gray row fill
 	        }
 
@@ -521,77 +523,31 @@ void main() {
 	            uint char_idx = uint(floor(text_local_x / 6.0));
 	            uint current_ascii = 0u;
 
-	            if (row_index == 0.0) {      // ROW 0: RESTORE
-	                if (char_idx < 7u) current_ascii = CDE_LABEL_RESTORE[char_idx];
-	            }
-	            else if (row_index == 1.0) { // ROW 1: MINIMIZE
-	                if (char_idx < 8u) current_ascii = CDE_LABEL_MINIMIZE[char_idx];
-	            }
-	            else if (row_index == 2.0) { // ROW 2: LOWER
-	                if (char_idx < 5u) current_ascii = CDE_LABEL_LOWER[char_idx];
-	            }
-	            else if (row_index == 3.0) { // ROW 3: CLOSE
-	                if (char_idx < 5u) current_ascii = CDE_LABEL_CLOSE[char_idx];
+	            if (push.is_pressed == 1u) {
+	                // RootApps menu
+	                if (row_index == 0.0 && char_idx < 8u) current_ascii = CDE_LABEL_TERMINAL[char_idx];
+	                else if (row_index == 1.0 && char_idx < 8u) current_ascii = CDE_LABEL_FILEMGR[char_idx];
+	                else if (row_index == 2.0 && char_idx < 8u) current_ascii = CDE_LABEL_LOCKSCREEN[char_idx];
+	                else if (row_index == 3.0 && char_idx < 6u) current_ascii = CDE_LABEL_CANCEL[char_idx];
+	            } else if (push.is_pressed == 2u) {
+	                // WindowList menu (packed 4 chars per row in title_chars)
+	                if (char_idx < 4u) {
+	                    current_ascii = push.title_chars[(uint(row_index) * 4u) + char_idx];
+	                }
+	            } else {
+	                // WindowOps menu
+	                if (row_index == 0.0 && char_idx < 7u) current_ascii = CDE_LABEL_RESTORE[char_idx];
+	                else if (row_index == 1.0 && char_idx < 8u) current_ascii = CDE_LABEL_MINIMIZE[char_idx];
+	                else if (row_index == 2.0 && char_idx < 5u) current_ascii = CDE_LABEL_LOWER[char_idx];
+	                else if (row_index == 3.0 && char_idx < 5u) current_ascii = CDE_LABEL_CLOSE[char_idx];
 	            }
 
 	            // Print fonts natively onto the pipeline grid
 	            if (current_ascii != 0u && draw_cde_ascii_glyph(current_ascii, glyph_x, text_local_y)) {
-	                color = (row_index == 3.0) ? vec3(1.0, 1.0, 1.0) : vec3(0.15, 0.15, 0.15);
+	                color = is_bottom_action ? vec3(1.0, 1.0, 1.0) : vec3(0.15, 0.15, 0.15);
 	            }
 	        }
 	    }
-
-		if (adjusted_y >= 0.0 && adjusted_y < (row_height * 4.0)) {
-		        float row_index = 3.0 - floor(adjusted_y / row_height);
-		        float local_y = mod(adjusted_y, row_height);
-
-		        // Check if our higher bitwise mapping flag tracks a standard app menu or root menu background panel
-		        bool is_root_workspace_menu = (push.is_pressed == 1u); // Unpacks the upper-bit state flag shift
-
-		        float text_local_x = local_x - 12.0;
-		        float text_local_y = (row_height - local_y) - 6.0;
-
-		        if (text_local_x >= 0.0 && text_local_y >= 0.0 && text_local_y < 7.0) {
-		            float glyph_x = mod(text_local_x, 6.0);
-		            uint char_idx = uint(floor(text_local_x / 6.0));
-		            uint current_ascii = 0u;
-
-		            if (is_root_workspace_menu) {
-		                // Background root dashboard layout
-		                if (row_index == 0.0) {      // ROW 0: "TERMINAL"
-		                    if (char_idx < 8u) current_ascii = CDE_LABEL_TERMINAL[char_idx];
-		                }
-		                else if (row_index == 1.0) { // ROW 1: "FILE MGR"
-		                    if (char_idx < 8u) current_ascii = CDE_LABEL_FILEMGR[char_idx];
-		                }
-		                else if (row_index == 2.0) { // ROW 2: "LOCK SCR"
-		                    if (char_idx < 8u) current_ascii = CDE_LABEL_LOCKSCREEN[char_idx];
-		                }
-		                else if (row_index == 3.0) { // ROW 3: "CANCEL"
-		                    if (char_idx < 6u) current_ascii = CDE_LABEL_CANCEL[char_idx];
-		                }
-		            } else {
-		                // Standard window decorations menus
-		                if (row_index == 0.0) {
-		                    if (char_idx < 7u) current_ascii = CDE_LABEL_RESTORE[char_idx];
-		                }
-		                else if (row_index == 1.0) {
-		                    if (char_idx < 8u) current_ascii = CDE_LABEL_MINIMIZE[char_idx];
-		                }
-		                else if (row_index == 2.0) {
-		                    if (char_idx < 5u) current_ascii = CDE_LABEL_LOWER[char_idx];
-		                }
-		                else if (row_index == 3.0) {
-		                    if (char_idx < 5u) current_ascii = CDE_LABEL_CLOSE[char_idx];
-		                }
-		            }
-
-		            // Print fonts natively down the pipeline grid
-		            if (current_ascii != 0u && draw_cde_ascii_glyph(current_ascii, glyph_x, text_local_y)) {
-		                color = (row_index == 3.0) ? vec3(1.0, 1.0, 1.0) : vec3(0.15, 0.15, 0.15);
-		            }
-		        }
-		}
 
 	    outColor = vec4(color, 1.0);
 	    return;

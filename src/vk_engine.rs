@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::os::fd::BorrowedFd;
 use std::os::linux::fs::MetadataExt;
 
+use crate::MenuKind;
 use crate::ActiveMenu;
 use crate::WindowContext;
 use crate::constants::*;
@@ -949,20 +950,32 @@ impl VulkanEngine {
                 }
             }
 
-            // Render interactive CDE procedural dropdown menu
+            // Render interactive CDE/FVWM procedural dropdown menu
             if let Some(menu) = active_menu {
-                // If window_id == 0, we add (1 << 4) to shift state flag indices cleanly down the shader pipeline.
-                let packed_menu_flag = if menu.window_id == 0 { 5u32 | (1u32 << 4) } else { 5u32 };
+                let menu_kind_flag = match menu.kind {
+                    MenuKind::WindowOps => 0u32,
+                    MenuKind::RootApps => 1u32,
+                    MenuKind::WindowList => 2u32,
+                };
+                let ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, menu.x, menu.y);
 
-                // is_focused = 5 signals your fragment shader to render a retro chiseled
-                // popup container overlay featuring 4 internal highlighted text item rows.
-                self.draw_procedural_ui_element(
-                    cmd_buf,
-                    screen_h,
-                    screen_w,
-                    (menu.x, menu.y, menu.width, menu.height),
-                    packed_menu_flag,
-                );
+                // Pack up to 4 rows x 4 chars (16 u32s) into title_chars so the shader renders all 4 labels in 1 draw call!
+                let mut packed_chars = [0u32; 16];
+                for r in 0..4 {
+                    for c in 0..4 {
+                        packed_chars[(r * 4) + c] = menu.row_labels[r][c];
+                    }
+                }
+
+                let push_constants = CdePushConstants {
+                    mvp: ortho_matrix,
+                    element_size: [menu.width, menu.height],
+                    is_focused: 5u32,
+                    is_dragging: menu.item_count,
+                    is_pressed: menu_kind_flag,
+                    title_chars: packed_chars,
+                };
+                self.draw_element(cmd_buf, self.descriptor_set, push_constants);
             }
 
             self.device.cmd_end_render_pass(cmd_buf);
