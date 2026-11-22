@@ -39,3 +39,14 @@ pub const CDE_ROOT_MENU_ITEM_TERMINAL: u32 = 0;
 pub const CDE_ROOT_MENU_ITEM_FILEMGR: u32  = 1;
 pub const CDE_ROOT_MENU_ITEM_LOCK: u32     = 2;
 pub const CDE_ROOT_MENU_ITEM_CANCEL: u32   = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopMode {
+    Cde,
+    Fvwm,
+}
+
+// FVWM Pager / Dock Metrics (bottom-right corner module)
+pub const FVWM_PAGER_WIDTH: f32 = 160.0;
+pub const FVWM_PAGER_HEIGHT: f32 = 120.0;
+pub const FVWM_EDGE_PAN_COOLDOWN_MS: u128 = 350;

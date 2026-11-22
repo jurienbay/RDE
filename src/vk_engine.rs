@@ -662,6 +662,7 @@ impl VulkanEngine {
         is_session_locked: bool,
         password_length: u32,
         active_menu: Option<ActiveMenu>,
+        desktop_mode: DesktopMode,
     ) {
         unsafe {
             // Wait for previous GPU frames to complete
@@ -703,7 +704,18 @@ impl VulkanEngine {
                 .begin_command_buffer(cmd_buf, &vk::CommandBufferBeginInfo::default())
                 .unwrap();
 
-            let clear_values = workspace_clear_colour(active_workspace);
+            let clear_values = match desktop_mode {
+                DesktopMode::Cde => {
+                    workspace_clear_colour(active_workspace)
+                }
+                DesktopMode::Fvwm => {
+                    [vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.18, 0.25, 0.28, 1.0],
+                        },
+                    }]
+                }
+            };
             let render_pass_begin_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass)
                 .framebuffer(self.framebuffers[image_index as usize])
@@ -807,6 +819,13 @@ impl VulkanEngine {
                                 // This acts as the thick chiseled outer border.
                                 //let fallback_frame_set = self.descriptor_sets[0];
 
+                                // Use titlebar-only height if window is shaded in FVWM mode
+                                let render_height = if window.is_shaded {
+                                    CDE_TITLEBAR_HEIGHT
+                                } else {
+                                    window.height
+                                };
+
                                 // Build the projection layout translation matrix factoring floating window offsets!
                                 let pass1_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, window.x, window.y);
                                 let title_chars = {
@@ -817,7 +836,7 @@ impl VulkanEngine {
                                 };
                                 let pass1_push_constants = CdePushConstants {
                                     mvp: pass1_ortho_matrix,
-                                    element_size: [window.width, window.height],
+                                    element_size: [window.width, render_height],
                                     is_focused,
                                     is_dragging,
                                     is_pressed,
@@ -832,39 +851,42 @@ impl VulkanEngine {
                                     pass1_push_constants,
                                 );
 
-                                // ----------------===========================================
-                                // Draw live application inside texture interior
-                                // ------------------------------------------------===========
-                                // Offset the coordinates inward to nested borders limits
-                                let client_x = window.x + CDE_BORDER_WIDTH;
+                                // Skip rendering the client texture interior when shaded!
+                                if !window.is_shaded {
+                                    // ----------------===========================================
+                                    // Draw live application inside texture interior
+                                    // ------------------------------------------------===========
+                                    // Offset the coordinates inward to nested borders limits
+                                    let client_x = window.x + CDE_BORDER_WIDTH;
 
-                                // Instead of adding CDE_BORDER_WIDTH, we add CDE_TITLEBAR_HEIGHT so the texture
-                                // renders cleanly beneath your blue CDE focus header panel strips.
-                                let client_y = window.y + CDE_TITLEBAR_HEIGHT;
-                                //let client_y = window.y + CDE_BORDER_WIDTH; // Sits neatly above the bottom border strip
+                                    // Instead of adding CDE_BORDER_WIDTH, we add CDE_TITLEBAR_HEIGHT so the texture
+                                    // renders cleanly beneath your blue CDE focus header panel strips.
+                                    let client_y = window.y + CDE_TITLEBAR_HEIGHT;
+                                    //let client_y = window.y + CDE_BORDER_WIDTH; // Sits neatly above the bottom border strip
 
-                                // Deduct side borders and top titlebar padding from total rendering envelope space
-                                let client_w = window.width - (CDE_BORDER_WIDTH * 2.0);
-                                let client_h = window.height - (CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT);
-                                // Calculate projection mapping aligned exactly with inner client viewport offsets
-                                let pass2_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, client_x, client_y);
+                                    // Deduct side borders and top titlebar padding from total rendering envelope space
+                                    let client_w = window.width - (CDE_BORDER_WIDTH * 2.0);
+                                    let client_h = window.height - (CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT);
+                                    // Calculate projection mapping aligned exactly with inner client viewport offsets
+                                    let pass2_ortho_matrix = find_pass_ortho_matrix(screen_h, screen_w, client_x, client_y);
 
-                                let pass2_push_constants = CdePushConstants {
-                                    mvp: pass2_ortho_matrix,
-                                    element_size: [client_w, client_h],
-                                    is_focused: 3u32, // Distinct state flag signaling raw app texture mapping pass
-                                    is_dragging,
-                                    is_pressed,
-                                    title_chars: [0u32; 16], // Not required for inner canvas layer
-                                };
-                                // Render the actual window client context inside the framed boundaries,
-                                // passing its own uniquely allocated descriptor set.
-                                // Draw this explicit window box using its cached texture map descriptor!
-                                self.draw_element(
-                                    cmd_buf,
-                                    tex.descriptor_set, // Binds this unique client container image layout
-                                    pass2_push_constants,
-                                );
+                                    let pass2_push_constants = CdePushConstants {
+                                        mvp: pass2_ortho_matrix,
+                                        element_size: [client_w, client_h],
+                                        is_focused: 3u32, // Distinct state flag signaling raw app texture mapping pass
+                                        is_dragging,
+                                        is_pressed,
+                                        title_chars: [0u32; 16], // Not required for inner canvas layer
+                                    };
+                                    // Render the actual window client context inside the framed boundaries,
+                                    // passing its own uniquely allocated descriptor set.
+                                    // Draw this explicit window box using its cached texture map descriptor!
+                                    self.draw_element(
+                                        cmd_buf,
+                                        tex.descriptor_set, // Binds this unique client container image layout
+                                        pass2_push_constants,
+                                    );
+                                }
                             }
                         }
                     }
@@ -872,46 +894,59 @@ impl VulkanEngine {
             }
 
             // Render CDE front panel desktop dock
-            {
-                // Calculate bottom center positioning matching the current monitor resolution
-                let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
-                let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0; // Anchored 10 pixels above the absolute screen bottom
-                // We encode the workspace selection into the higher bits of our integer flag!
-                // is_focused = 2 tells the shader it's the panel.
-                // Adding (active_workspace << 4) bundles the chosen desk index cleanly without extra push constant slots!
-                // We pass `2` for the `is_focused` parameter. This special flag tells our fragment
-                // shader: "This element is the Front Panel Dock—render interior button rows!"
-                self.draw_procedural_ui_element(
-                    cmd_buf,
-                    screen_h, screen_w,
-                    (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
-                    2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
-                );
+            match desktop_mode {
+                DesktopMode::Cde => {
+                    // Calculate bottom center positioning matching the current monitor resolution
+                    let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
+                    let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0; // Anchored 10 pixels above the absolute screen bottom
+                    // We encode the workspace selection into the higher bits of our integer flag!
+                    // is_focused = 2 tells the shader it's the panel.
+                    // Adding (active_workspace << 4) bundles the chosen desk index cleanly without extra push constant slots!
+                    // We pass `2` for the `is_focused` parameter. This special flag tells our fragment
+                    // shader: "This element is the Front Panel Dock—render interior button rows!"
+                    self.draw_procedural_ui_element(
+                        cmd_buf,
+                        screen_h, screen_w,
+                        (panel_x, panel_y, CDE_PANEL_WIDTH, CDE_PANEL_HEIGHT),
+                        2u32 | (active_workspace << 4), // Encodes (2 | active_workspace << 4)
+                    );
 
-                // Live FRONT PANEL Clock Text Overlay Pipeline
-                // Position the clock text lane on the left side of the Switcher matrix
-                let clock_w = 60.0;
-                let clock_h = 16.0;
-                let clock_x = panel_x + (CDE_PANEL_WIDTH / 2.0) - 130.0; // Pinned neatly to the left of the switcher
-                let clock_y = panel_y + ((CDE_PANEL_HEIGHT - clock_h) / 2.0);
+                    // Live FRONT PANEL Clock Text Overlay Pipeline
+                    // Position the clock text lane on the left side of the Switcher matrix
+                    let clock_w = 60.0;
+                    let clock_h = 16.0;
+                    let clock_x = panel_x + (CDE_PANEL_WIDTH / 2.0) - 130.0; // Pinned neatly to the left of the switcher
+                    let clock_y = panel_y + ((CDE_PANEL_HEIGHT - clock_h) / 2.0);
 
-                let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
-                let mut clock_chars = [0u32; 16];
-                for (i, ch) in time_str.chars().take(16).enumerate() {
-                    clock_chars[i] = ch as u32;
+                    let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
+                    let mut clock_chars = [0u32; 16];
+                    for (i, ch) in time_str.chars().take(16).enumerate() {
+                        clock_chars[i] = ch as u32;
+                    }
+
+                    let pass_matrix = find_pass_ortho_matrix(screen_h, screen_w, clock_x, clock_y);
+                    let clock_push_constants = CdePushConstants {
+                        mvp: pass_matrix,
+                        element_size: [clock_w, clock_h],
+                        is_focused: 6u32, // Tell the frag shader to render a clock
+                        is_dragging: 0u32,
+                        is_pressed: 0u32,
+                        title_chars: clock_chars, // Feed character tokens straight to shader
+                    };
+
+                    self.draw_element(cmd_buf, self.descriptor_set, clock_push_constants);
                 }
-
-                let pass_matrix = find_pass_ortho_matrix(screen_h, screen_w, clock_x, clock_y);
-                let clock_push_constants = CdePushConstants {
-                    mvp: pass_matrix,
-                    element_size: [clock_w, clock_h],
-                    is_focused: 6u32, // Tell the frag shader to render a clock
-                    is_dragging: 0u32,
-                    is_pressed: 0u32,
-                    title_chars: clock_chars, // Feed character tokens straight to shader
-                };
-
-                self.draw_element(cmd_buf, self.descriptor_set, clock_push_constants);
+                DesktopMode::Fvwm => {
+                    // Bottom-right FvwmPager container (shader flag 7 = FVWM Pager)
+                    let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
+                    let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
+                    self.draw_procedural_ui_element(
+                        cmd_buf,
+                        screen_h, screen_w,
+                        (pager_x, pager_y, FVWM_PAGER_WIDTH, FVWM_PAGER_HEIGHT),
+                        7u32 | (active_workspace << 4),
+                    );
+                }
             }
 
             // Render interactive CDE procedural dropdown menu

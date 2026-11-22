@@ -36,11 +36,15 @@ pub struct WindowContext {
     pub height: f32,
     pub workspace: u32,
     pub is_minimized: bool,
+    pub is_shaded: bool,
 }
 
 impl WindowContext {
     /// Detects if a coordinate hits the chiseled borders and maps the appropriate drag handle edge
     pub fn get_resize_edge(&self, mx: f32, my: f32) -> Option<ResizeEdge> {
+        if self.is_shaded {
+            return None; // Prevent resizing while rolled up
+        }
         let border = crate::CDE_BORDER_WIDTH;
         let corner = 24.0; // Matches shader corner_size layout metric
 

@@ -63,6 +63,9 @@ pub enum GrabState {
 }
 
 pub struct CdeCompositorState {
+    pub desktop_mode: DesktopMode,
+    pub last_edge_pan: Option<std::time::Instant>,
+    // XXX..
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState, // Standard tracking manager for app frames
@@ -383,6 +386,7 @@ impl XdgShellHandler for CdeCompositorState {
             height: overall_height,
             workspace: self.active_workspace,
             is_minimized: false,
+            is_shaded: false,
         });
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -542,6 +546,11 @@ fn verify_current_user_inline_secure(secure_password: &SecretBox<Vec<u8>>) -> bo
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let is_nested = args.contains(&"--nested".to_string());
+    let desktop_mode = if args.contains(&"--fvwm".to_string()) {
+        DesktopMode::Fvwm
+    } else {
+        DesktopMode::Cde
+    };
 
     let mut event_loop = EventLoop::<CdeCompositorState>::try_new()?;
     let display = Display::<CdeCompositorState>::new()?;
@@ -823,6 +832,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let location = event.position();
                         state.pointer_location = (location.x, location.y);
 
+                        // FVWM Mode: Sloppy Focus & Edge Panning across 2x2 Grid
+                        if state.desktop_mode == DesktopMode::Fvwm && state.current_grab == GrabState::Idle {
+                            let mx = location.x as f32;
+                            let my = location.y as f32;
+                            let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
+                            let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
+
+                            // Sloppy Focus: Focus topmost window under cursor without raising it
+                            if let Some(hovered_win) = state.open_windows.iter().rev().find(|w| {
+                                w.workspace == state.active_workspace && !w.is_minimized &&
+                                mx >= w.x && mx <= (w.x + w.width) &&
+                                my >= w.y && my <= (w.y + if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height })
+                            }) {
+                                let target_surface = hovered_win.toplevel.wl_surface().clone();
+                                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                                state.seat.get_keyboard().unwrap().set_focus(state, Some(target_surface), serial);
+                            }
+
+                            // Edge Panning: Flip across the 2x2 workspace grid when hitting screen edges
+                            let can_pan = state.last_edge_pan.map_or(true, |t| t.elapsed().as_millis() > FVWM_EDGE_PAN_COOLDOWN_MS);
+                            if can_pan {
+                                let mut col = (state.active_workspace % 2) as i32;
+                                let mut row = (state.active_workspace / 2) as i32;
+                                let mut panned = false;
+
+                                if mx <= 1.0 && col > 0 { col -= 1; panned = true; }
+                                else if mx >= screen_w - 2.0 && col < 1 { col += 1; panned = true; }
+                                else if my <= 1.0 && row > 0 { row -= 1; panned = true; }
+                                else if my >= screen_h - 2.0 && row < 1 { row += 1; panned = true; }
+
+                                if panned {
+                                    state.active_workspace = ((row * 2) + col) as u32;
+                                    state.last_edge_pan = Some(std::time::Instant::now());
+                                    println!("FVWM EdgeScroll: Panned to page ({}, {}) [Workspace {}]", col, row, state.active_workspace);
+                                }
+                            }
+                        }
+
                         // Pass motion vectors down to Smithay's virtual seat engine
                         state.seat.get_pointer().unwrap().motion(
                             state,
@@ -930,9 +977,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Search if right-click intersects any open app window on the active desk layout pane
                             let hit_a_window = state.open_windows.iter().any(|w| {
+                                let effective_h = if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height };
                                 w.workspace == state.active_workspace && !w.is_minimized &&
                                 mx >= w.x && mx <= (w.x + w.width) &&
-                                my >= w.y && my <= (w.y + w.height)
+                                my >= w.y && my <= (w.y + effective_h)
                             });
 
                             if !hit_a_window {
@@ -1047,81 +1095,96 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
                                     let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
 
-                                    // Replicate the exact Front Panel metrics from vk_engine.rs
-                                    let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
-                                    let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0;
+                                    if state.desktop_mode == DesktopMode::Fvwm {
+                                        // FVWM PAGER INTERACTION INTERCEPTOR (Bottom-Right Corner)
+                                        let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
+                                        let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
 
-                                    // FRONT PANEL DOCK INTERACTION INTERCEPTOR.
-                                    if mx >= panel_x && mx <= (panel_x + CDE_PANEL_WIDTH) &&
-                                       my >= panel_y && my <= (panel_y + CDE_PANEL_HEIGHT) {
-
-                                        // Calculate boundaries for the central Workspace Switcher box
-                                        let switch_left = panel_x + (CDE_PANEL_WIDTH / 2.0) - 50.0;
-                                        let switch_right = panel_x + (CDE_PANEL_WIDTH / 2.0) + 50.0;
-                                        let switch_top = panel_y + 8.0;
-                                        let switch_bottom = panel_y + CDE_PANEL_HEIGHT - 8.0;
-
-                                        if mx >= switch_left && mx <= switch_right &&
-                                           my >= switch_top && my <= switch_bottom {
-
-                                            let bx = mx - switch_left;
-                                            let by = my - switch_top;
-                                            let eth = 2.0;
-
-                                            let bw = switch_right - switch_left;
-                                            let bh = switch_bottom - switch_top;
-
-                                            let inner_bw = bw - (eth * 2.0);
-                                            let inner_bh = bh - (eth * 2.0);
-
-                                            // Calculate cell column and row sizes
-                                            let col_w = inner_bw / 2.0;
-                                            let row_h = inner_bh / 2.0;
-
-                                            let local_x = bx - eth;
-                                            let local_y = by - eth;
-
-                                            let col_idx = (local_x / col_w).floor() as i32;
-                                            let row_idx = (local_y / row_h).floor() as i32;
-
-                                            // Clamp cell coordinates
-                                            let col_idx = col_idx.clamp(0, 1);
-                                            let row_idx = row_idx.clamp(0, 1);
-
-                                            // Resolve total grid target room index
-                                            let clicked_workspace = (row_idx * 2) + col_idx;
-
-                                            if clicked_workspace >= 0 && clicked_workspace < 4 {
-                                                println!("Stacked Quad CDE Switcher: Switch to Room [{}]", clicked_workspace + 1);
-                                                state.active_workspace = clicked_workspace as u32;
-                                            }
-                                        } else {
-                                            // Calculate exact coordinates relative to the panel's left edge layout bounds
-                                            let panel_local_x = mx - panel_x;
-                                            let panel_local_y = my - panel_y;
-
-                                            // Matches shader button boundaries: left=20.0, right=64.0, top=10.0, bottom=54.0
-                                            // Left Button Bounds: 20.0 to 64.0
-                                            if panel_local_x >= 20.0 && panel_local_x <= 64.0 &&
-                                               panel_local_y >= 10.0 && panel_local_y <= 54.0 {
-                                            // User clicked on the wings of the front panel dock!
-                                            // Let's implement an absolute launch action if they clicked the left wing area.
-                                            //if mx < switch_left {
-                                                println!("CDE Shortcut Activated: Spawning Retro Terminal Console Application.");
-                                                std::process::Command::new("foot")
-                                                    .env("WAYLAND_DISPLAY", &closure_socket_name) // Inject live engine display socket!
-                                                    .spawn().expect("Failed to execute client process thread");
-                                            } else if panel_local_x >= 536.0 && panel_local_x <= 580.0 &&
-                                                      panel_local_y >= 10.0 && panel_local_y <= 54.0 {
-                                                // Right Button Bounds (600.0 - 64.0 = 536.0, and 600.0 - 20.0 = 580.0) TODO Use constants!
-                                                println!("CDE Trash Clicked: Spawning File Manager.");
-                                                // You can replace "pcmanfm" with "nautilus", "thunar", or a custom terminal runner
-                                                std::process::Command::new("pcmanfm")
-                                                    .env("WAYLAND_DISPLAY", &closure_socket_name) // Inject live engine display socket!
-                                                    .spawn().expect("Failed to execute file manager client shortcut process");
-                                            }
+                                        if mx >= pager_x && mx <= (pager_x + FVWM_PAGER_WIDTH) &&
+                                           my >= pager_y && my <= (pager_y + FVWM_PAGER_HEIGHT) {
+                                            let col = (((mx - pager_x) / (FVWM_PAGER_WIDTH / 2.0)).floor() as u32).clamp(0, 1);
+                                            let row = (((my - pager_y) / (FVWM_PAGER_HEIGHT / 2.0)).floor() as u32).clamp(0, 1);
+                                            state.active_workspace = (row * 2) + col;
+                                            println!("FVWM Pager: Switched to Page ({}, {}) [Workspace {}]", col, row, state.active_workspace);
+                                            return;
                                         }
-                                        return; // Intercepted: skip trailing window tests entirely!
+                                    } else {
+                                        // Replicate the exact Front Panel metrics from vk_engine.rs
+                                        let panel_x = (screen_w - CDE_PANEL_WIDTH) / 2.0;
+                                        let panel_y = screen_h - CDE_PANEL_HEIGHT - 10.0;
+
+                                        // FRONT PANEL DOCK INTERACTION INTERCEPTOR.
+                                        if mx >= panel_x && mx <= (panel_x + CDE_PANEL_WIDTH) &&
+                                           my >= panel_y && my <= (panel_y + CDE_PANEL_HEIGHT) {
+
+                                            // Calculate boundaries for the central Workspace Switcher box
+                                            let switch_left = panel_x + (CDE_PANEL_WIDTH / 2.0) - 50.0;
+                                            let switch_right = panel_x + (CDE_PANEL_WIDTH / 2.0) + 50.0;
+                                            let switch_top = panel_y + 8.0;
+                                            let switch_bottom = panel_y + CDE_PANEL_HEIGHT - 8.0;
+
+                                            if mx >= switch_left && mx <= switch_right &&
+                                               my >= switch_top && my <= switch_bottom {
+
+                                                let bx = mx - switch_left;
+                                                let by = my - switch_top;
+                                                let eth = 2.0;
+
+                                                let bw = switch_right - switch_left;
+                                                let bh = switch_bottom - switch_top;
+
+                                                let inner_bw = bw - (eth * 2.0);
+                                                let inner_bh = bh - (eth * 2.0);
+
+                                                // Calculate cell column and row sizes
+                                                let col_w = inner_bw / 2.0;
+                                                let row_h = inner_bh / 2.0;
+
+                                                let local_x = bx - eth;
+                                                let local_y = by - eth;
+
+                                                let col_idx = (local_x / col_w).floor() as i32;
+                                                let row_idx = (local_y / row_h).floor() as i32;
+
+                                                // Clamp cell coordinates
+                                                let col_idx = col_idx.clamp(0, 1);
+                                                let row_idx = row_idx.clamp(0, 1);
+
+                                                // Resolve total grid target room index
+                                                let clicked_workspace = (row_idx * 2) + col_idx;
+
+                                                if clicked_workspace >= 0 && clicked_workspace < 4 {
+                                                    println!("Stacked Quad CDE Switcher: Switch to Room [{}]", clicked_workspace + 1);
+                                                    state.active_workspace = clicked_workspace as u32;
+                                                }
+                                            } else {
+                                                // Calculate exact coordinates relative to the panel's left edge layout bounds
+                                                let panel_local_x = mx - panel_x;
+                                                let panel_local_y = my - panel_y;
+
+                                                // Matches shader button boundaries: left=20.0, right=64.0, top=10.0, bottom=54.0
+                                                // Left Button Bounds: 20.0 to 64.0
+                                                if panel_local_x >= 20.0 && panel_local_x <= 64.0 &&
+                                                   panel_local_y >= 10.0 && panel_local_y <= 54.0 {
+                                                // User clicked on the wings of the front panel dock!
+                                                // Let's implement an absolute launch action if they clicked the left wing area.
+                                                //if mx < switch_left {
+                                                    println!("CDE Shortcut Activated: Spawning Retro Terminal Console Application.");
+                                                    std::process::Command::new("foot")
+                                                        .env("WAYLAND_DISPLAY", &closure_socket_name) // Inject live engine display socket!
+                                                        .spawn().expect("Failed to execute client process thread");
+                                                } else if panel_local_x >= 536.0 && panel_local_x <= 580.0 &&
+                                                          panel_local_y >= 10.0 && panel_local_y <= 54.0 {
+                                                    // Right Button Bounds (600.0 - 64.0 = 536.0, and 600.0 - 20.0 = 580.0) TODO Use constants!
+                                                    println!("CDE Trash Clicked: Spawning File Manager.");
+                                                    // You can replace "pcmanfm" with "nautilus", "thunar", or a custom terminal runner
+                                                    std::process::Command::new("pcmanfm")
+                                                        .env("WAYLAND_DISPLAY", &closure_socket_name) // Inject live engine display socket!
+                                                        .spawn().expect("Failed to execute file manager client shortcut process");
+                                                }
+                                            }
+                                            return; // Intercepted: skip trailing window tests entirely!
+                                        }
                                     }
 
                                     // Locate which window was clicked under Z-order stacking rules
@@ -1134,8 +1197,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 my >= w.y && my <= (w.y + CDE_ICON_HEIGHT)
                                         } else {
                                             // Regular open windows evaluate standard titlebar decoration metrics
+                                            let effective_h = if w.is_shaded { CDE_TITLEBAR_HEIGHT } else { w.height };
                                             mx >= w.x && mx <= (w.x + w.width) &&
-                                            my >= w.y && my <= (w.y + w.height)
+                                            my >= w.y && my <= (w.y + effective_h)
                                         }
                                     }) {
                                         let window = &state.open_windows[w_idx];
@@ -1162,8 +1226,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
 
                                         // Evaluate if click hits within window bounding coordinates
+                                        let effective_h = if window.is_shaded { CDE_TITLEBAR_HEIGHT } else { window.height };
                                         if mx >= window.x && mx <= (window.x + window.width) &&
-                                           my >= window.y && my <= (window.y + window.height) {
+                                           my >= window.y && my <= (window.y + effective_h) {
                                                 // Close Button location bounds
                                                 let close_btn_x = window.x + window.width - CDE_BORDER_WIDTH - CDE_BUTTON_OFFSET - CDE_BUTTON_SIZE;
                                                 let btn_y = window.y + ((CDE_TITLEBAR_HEIGHT - CDE_BUTTON_SIZE) / 2.0);
@@ -1214,6 +1279,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 // Only allow window dragging if the user clicks inside the titlebar area
                                                 // (between top of window and TITLEBAR_HEIGHT)
                                                 if my <= (window.y + CDE_TITLEBAR_HEIGHT) {
+                                                    if state.desktop_mode == DesktopMode::Fvwm {
+                                                        let now = std::time::Instant::now();
+                                                        let is_double_click = state.last_clicked_window_id == Some(window.id) &&
+                                                            state.last_click_timestamp.map_or(false, |t| now.duration_since(t).as_millis() < 250);
+
+                                                        state.last_clicked_window_id = Some(window.id);
+                                                        state.last_click_timestamp = Some(now);
+
+                                                        if is_double_click {
+                                                            state.open_windows[index].is_shaded = !state.open_windows[index].is_shaded;
+                                                            closed_a_window = true;
+                                                            break;
+                                                        }
+                                                    }
                                                     hit_window = Some(index);
                                                 } else if let Some(edge) = window.get_resize_edge(mx, my) {
                                                     // Check if mouse clicks on outer chiseled frame handles.
@@ -1498,7 +1577,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.active_workspace,
                     state.is_session_locked,
                     state.password_length,
-                    state.active_menu
+                    state.active_menu,
+                    state.desktop_mode,
                 );
                 winit_backend.bind().unwrap();
             }
@@ -1508,6 +1588,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } // xXX
 
     let mut state = CdeCompositorState {
+        desktop_mode,
+        last_edge_pan: None,
+        // XXX
         display_handle: display_handle,
         compositor_state,
         xdg_shell_state,
@@ -1563,6 +1646,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.is_session_locked,
             state.password_length,
             state.active_menu,
+            state.desktop_mode,
         );
 
         // Natively drain and parse incoming client data on the thread context directly!
