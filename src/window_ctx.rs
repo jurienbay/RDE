@@ -2,6 +2,7 @@
 // Copyright (C) <2026>, <Edward O'Callaghan>, All rights reserved.
 
 use smithay::wayland::shell::xdg::ToplevelSurface;
+use smithay::wayland::shell::wlr_layer::{Layer, LayerSurface};
 
 // Explicit structural tags matching standard Wayland layout rules
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,4 +94,21 @@ impl ActiveMenu {
         }
         buf
     }
+}
+
+pub struct LayerContext {
+    pub id: u32,
+    pub surface: LayerSurface,
+    pub layer: Layer,
+    pub namespace: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+pub fn next_surface_id() -> u32 {
+    static SURFACE_ID_ALLOCATOR: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(1);
+    SURFACE_ID_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

@@ -5,6 +5,7 @@ use ash::{Device, Entry, Instance, khr, vk};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::WinitGraphicsBackend;
+use smithay::wayland::shell::wlr_layer::Layer;
 
 use std::sync::Arc;
 use std::os::fd::BorrowedFd;
@@ -13,6 +14,7 @@ use std::os::linux::fs::MetadataExt;
 use crate::MenuKind;
 use crate::ActiveMenu;
 use crate::WindowContext;
+use crate::LayerContext;
 use crate::constants::*;
 use crate::glsl::*;
 
@@ -646,7 +648,8 @@ impl VulkanEngine {
         is_session_locked: bool,
         password_length: u32,
         active_menu: Option<ActiveMenu>,
-        personality: &dyn crate::personality::DesktopPersonality
+        personality: &dyn crate::personality::DesktopPersonality,
+        layer_surfaces: &[LayerContext],
     ) {
         unsafe {
             // Wait for previous GPU frames to complete
@@ -737,6 +740,15 @@ impl VulkanEngine {
             // This reads uploaded client texture and maps it onto the orthographic screen geometry.
             // Access the active texture table to draw each window box individually
             let textures = self.window_textures.lock().unwrap();
+
+            self.draw_layer_batch(
+                cmd_buf,
+                &textures,
+                layer_surfaces,
+                &[Layer::Background, Layer::Bottom],
+                screen_w,
+                screen_h,
+            );
 
             for (index, window) in open_windows.iter().enumerate() {
                 // Skip drawing entirely if the window belongs to a different desktop pane
@@ -872,7 +884,17 @@ impl VulkanEngine {
             }
 
             // Render CDE front panel desktop dock
-            personality.render_chrome(self, cmd_buf, screen_w, screen_h, active_workspace);
+            let has_external_pager = layer_surfaces.iter().any(|l| l.namespace == "fvwm-pager");
+            personality.render_chrome(self, cmd_buf, screen_w, screen_h, active_workspace, has_external_pager);
+
+            self.draw_layer_batch(
+                cmd_buf,
+                &textures,
+                layer_surfaces,
+                &[Layer::Top, Layer::Overlay],
+                screen_w,
+                screen_h,
+            );
 
             // Render interactive CDE/FVWM procedural dropdown menu
             if let Some(menu) = active_menu {
@@ -955,6 +977,33 @@ impl VulkanEngine {
         };
     
         self.draw_element(cmd_buf, self.descriptor_set, clock_push_constants);
+    }
+
+    fn draw_layer_batch(
+        &self,
+        cmd_buf: vk::CommandBuffer,
+        textures: &std::collections::HashMap<u32, WindowTexture>,
+        layers: &[LayerContext],
+        allowed: &[Layer],
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        for layer in layers.iter().filter(|l| allowed.contains(&l.layer)) {
+            if let Some(tex) = textures.get(&layer.id) {
+                if layer.width > 0.0 && layer.height > 0.0 {
+                    let ortho = find_pass_ortho_matrix(screen_h, screen_w, layer.x, layer.y);
+                    let push = CdePushConstants {
+                        mvp: ortho,
+                        element_size: [layer.width, layer.height],
+                        is_focused: 3u32,
+                        is_dragging: 0,
+                        is_pressed: 0,
+                        title_chars: [0u32; 16],
+                    };
+                    self.draw_element(cmd_buf, tex.descriptor_set, push);
+                }
+            }
+        }
     }
 
     fn execute_one_time_commands<F>(&self, handler: F)

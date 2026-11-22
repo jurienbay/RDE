@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="fvwm_pager_v1">
+  <interface name="zfvwm_pager_manager_v1" version="1">
+    <description summary="FVWM pager workspace control and state sync">
+      Allows external FVWM pager modules to observe and switch active workspaces.
+    </description>
+
+    <request name="set_workspace">
+      <description summary="Switch the active compositor workspace">
+        Requests the compositor to switch to the given 0-based workspace index.
+      </description>
+      <arg name="workspace" type="uint" summary="0-based workspace index (0..3)"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="Destroy the manager object"/>
+    </request>
+
+    <event name="workspace_changed">
+      <description summary="Notify client that the active workspace changed"/>
+      <arg name="workspace" type="uint" summary="New 0-based active workspace index"/>
+    </event>
+
+    <event name="screen_size">
+      <description summary="Notify client of the logical screen dimensions"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <request name="pick_window">
+      <description summary="Ask the user to click a window and report its properties"/>
+    </request>
+
+    <event name="window_ident">
+      <description summary="Detailed window metadata for FvwmIdent"/>
+      <arg name="id" type="uint"/>
+      <arg name="title" type="string"/>
+      <arg name="app_id" type="string"/>
+      <arg name="workspace" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="flags" type="uint" summary="bit 0: focused, bit 1: shaded, bit 2: minimized"/>
+    </event>
+
+    <event name="window_update">
+      <description summary="Add or update a window's miniature geometry in the pager"/>
+      <arg name="id" type="uint"/>
+      <arg name="workspace" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="is_focused" type="uint"/>
+    </event>
+
+    <event name="window_remove">
+      <description summary="Remove a closed or minimized window from the pager"/>
+      <arg name="id" type="uint"/>
+    </event>
+
+    <event name="done">
+      <description summary="Signals end of a window geometry batch"/>
+    </event>
+  </interface>
+</protocol>

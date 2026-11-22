@@ -8,6 +8,7 @@ description = "Reasonable Desktop Enviroment is a CDE-lookalike Wayland composit
 [dependencies]
 smithay = { version = "0.7", features = ["backend_winit", "wayland_frontend"] }
 wayland-server = "0.31"
+wayland-scanner = "0.31"
 #calloop = "0.12"
 raw-window-handle = "0.6"
 xkbcommon = "0.7"

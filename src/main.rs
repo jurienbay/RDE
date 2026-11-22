@@ -25,6 +25,9 @@ use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorati
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
+use smithay::wayland::shell::wlr_layer::{
+    Anchor, Layer, LayerSurface, LayerSurfaceConfigure, WlrLayerShellHandler, WlrLayerShellState, LayerSurfaceCachedState,
+};
 use smithay::wayland::shm::{ShmHandler, ShmState};
 
 use secrecy::{ExposeSecret, SecretBox};
@@ -47,10 +50,14 @@ use cde_personality::CdePersonality;
 mod fvwm_personality;
 use fvwm_personality::FvwmPersonality;
 
+mod pager_protocol;
+use pager_protocol::PagerProtocolState;
+
 // Add an active drag state tracker enum
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GrabState {
     Idle,
+    PickingWindow,
     Dragging {
         window_index: usize,
         start_mouse: (f64, f64),
@@ -98,9 +105,16 @@ pub struct CdeCompositorState {
     pub is_session_locked: bool,
     pub password_length: u32,
     pub secure_password_buffer: SecretBox<Vec<u8>>,
+    pub layer_shell_state: WlrLayerShellState,
+    pub layer_surfaces: Vec<LayerContext>,
+    pub pager_protocol_state: PagerProtocolState,
 }
 
 impl CdeCompositorState {
+    pub fn has_external_pager(&self) -> bool {
+        self.layer_surfaces.iter().any(|l| l.namespace == "fvwm-pager")
+    }
+
     pub fn toggle_personality(&mut self) {
         self.active_menu = None;
         if self.personality.name() == "CDE" {
@@ -195,6 +209,7 @@ impl CdeCompositorState {
             let col_idx = (((mx - switch_left - eth) / col_w).floor() as i32).clamp(0, 1);
             let row_idx = (((my - switch_top - eth) / row_h).floor() as i32).clamp(0, 1);
             self.active_workspace = ((row_idx * 2) + col_idx) as u32;
+            self.pager_protocol_state.notify_workspace_changed(self.active_workspace);
         } else {
             let local_x = mx - panel_x;
             let local_y = my - panel_y;
@@ -210,6 +225,90 @@ impl CdeCompositorState {
         }
         true
     }
+
+    pub fn sync_pager_windows(&mut self) {
+        if self.pager_protocol_state.clients.is_empty() {
+            return;
+        }
+        let screen_w = self.vulkan_engine.swapchain_extent.width;
+        let screen_h = self.vulkan_engine.swapchain_extent.height;
+        let top_idx = self.open_windows.len().saturating_sub(1);
+
+        let snapshots: Vec<crate::pager_protocol::PagerWindowInfo> = self
+            .open_windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !w.is_minimized)
+            .map(|(i, w)| crate::pager_protocol::PagerWindowInfo {
+                id: w.id,
+                workspace: w.workspace,
+                x: w.x as i32,
+                y: w.y as i32,
+                width: w.width as u32,
+                height: if w.is_shaded {
+                    CDE_TITLEBAR_HEIGHT as u32
+                } else {
+                    w.height as u32
+                },
+                is_focused: i == top_idx,
+            })
+            .collect();
+
+        self.pager_protocol_state
+            .sync_windows(screen_w, screen_h, &snapshots);
+    }
+
+    pub fn inspect_window_at(&mut self, mx: f32, my: f32) {
+        let top_idx = self.open_windows.len().saturating_sub(1);
+        let hit = self.open_windows.iter().enumerate().rev().find(|(_, w)| {
+            if w.workspace != self.active_workspace {
+                return false;
+            }
+            let (w_width, w_height) = if w.is_minimized {
+                (CDE_ICON_WIDTH, CDE_ICON_HEIGHT)
+            } else if w.is_shaded {
+                (w.width, CDE_TITLEBAR_HEIGHT)
+            } else {
+                (w.width, w.height)
+            };
+            mx >= w.x && mx <= (w.x + w_width) && my >= w.y && my <= (w.y + w_height)
+        });
+
+        if let Some((idx, win)) = hit {
+            let surface = win.toplevel.wl_surface();
+            let (title, app_id) = smithay::wayland::compositor::with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                    .map(|data| {
+                        let guard = data.lock().unwrap();
+                        (
+                            guard.title.clone().unwrap_or_else(|| "Untitled".to_string()),
+                            guard.app_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                        )
+                    })
+                    .unwrap_or_else(|| ("Untitled".to_string(), "unknown".to_string()))
+            });
+
+            let mut flags = 0u32;
+            if idx == top_idx { flags |= 1; }
+            if win.is_shaded { flags |= 2; }
+            if win.is_minimized { flags |= 4; }
+
+            let info = crate::pager_protocol::WindowIdentInfo {
+                id: win.id,
+                title,
+                app_id,
+                workspace: win.workspace,
+                x: win.x as i32,
+                y: win.y as i32,
+                width: win.width as u32,
+                height: win.height as u32,
+                flags,
+            };
+            self.pager_protocol_state.notify_window_ident(&info);
+        }
+    }
 }
 
 smithay::delegate_data_device!(CdeCompositorState);
@@ -221,6 +320,7 @@ smithay::delegate_seat!(CdeCompositorState);
 smithay::delegate_session_lock!(CdeCompositorState);
 smithay::delegate_shm!(CdeCompositorState);
 smithay::delegate_output!(CdeCompositorState);
+smithay::delegate_layer_shell!(CdeCompositorState);
 
 impl CompositorHandler for CdeCompositorState {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -266,17 +366,98 @@ impl CompositorHandler for CdeCompositorState {
                 .for_each(|callback| callback.done(time));
         });
 
+        // Update layer surface geometry first (even if committed_buffer is None)
+        let screen_w = self.vulkan_engine.swapchain_extent.width as f32;
+        let screen_h = self.vulkan_engine.swapchain_extent.height as f32;
+
+        // ..
+        if let Some(layer_ctx) = self
+            .layer_surfaces
+            .iter_mut()
+            .find(|l| l.surface.wl_surface() == surface)
+        {
+            smithay::wayland::compositor::with_states(surface, |states| {
+                let mut guard = states.cached_state.get::<LayerSurfaceCachedState>();
+                let state = guard.current();
+
+                let w = if state.size.w == 0 { screen_w } else { state.size.w as f32 };
+                let h = if state.size.h == 0 { screen_h } else { state.size.h as f32 };
+
+                layer_ctx.width = w;
+                layer_ctx.height = h;
+
+                layer_ctx.x = if state.anchor.contains(Anchor::LEFT) {
+                    state.margin.left as f32
+                } else if state.anchor.contains(Anchor::RIGHT) {
+                    screen_w - w - state.margin.right as f32
+                } else {
+                    (screen_w - w) / 2.0
+                };
+
+                layer_ctx.y = if state.anchor.contains(Anchor::TOP) {
+                    state.margin.top as f32
+                } else if state.anchor.contains(Anchor::BOTTOM) {
+                    screen_h - h - state.margin.bottom as f32
+                } else {
+                    (screen_h - h) / 2.0
+                };
+            });
+        }
+
+        // Snap fixed-size dialogs (like FvwmIdent) to their requested min_size == max_size
+// XXX mangles text
+//        if let Some(win) = self
+//            .open_windows
+//            .iter_mut()
+//            .find(|w| w.toplevel.wl_surface() == surface)
+//        {
+//            let fixed_size = smithay::wayland::compositor::with_states(surface, |states| {
+//                let mut guard = states
+//                    .cached_state
+//                    .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+//                let current = guard.current();
+//                if current.min_size.w > 0
+//                    && current.min_size.h > 0
+//                    && current.min_size == current.max_size
+//                {
+//                    Some(current.min_size)
+//                } else {
+//                    None
+//                }
+//            });
+//
+//            // `with_states` has released its lock here — safe to configure now!
+//            if let Some(sz) = fixed_size {
+//                let target_w = sz.w as f32 + (CDE_BORDER_WIDTH * 2.0);
+//                let target_h = sz.h as f32 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
+//                if (win.width - target_w).abs() > 1.0 || (win.height - target_h).abs() > 1.0 {
+//                    win.width = target_w;
+//                    win.height = target_h;
+//                    win.toplevel.with_pending_state(|s| {
+//                        s.size = Some((sz.w, sz.h).into());
+//                    });
+//                    win.toplevel.send_pending_configure();
+//                }
+//            }
+//        }
+
+        // Upload the committed buffer (if present) for either an XDG window or a Layer surface
         // XXX
         // TODO use dmabuf and VK_EXT_external_memory_dma_buf.
         if let Some(wl_buffer) = committed_buffer {
             // FIRST PATH: Attempt to capture direct hardware DMABUF graphics frames
-
             // Locate which window context matches this active surface commit
             let target_window_id = self
                 .open_windows
                 .iter()
                 .find(|w| w.toplevel.wl_surface() == surface)
-                .map(|w| w.id);
+                .map(|w| w.id)
+                .or_else(|| {
+                    self.layer_surfaces
+                        .iter()
+                        .find(|l| l.surface.wl_surface() == surface)
+                        .map(|l| l.id)
+                });
 
             if let Some(window_id) = target_window_id {
                 if let Ok(dmabuf) = get_dmabuf(&wl_buffer) {
@@ -451,8 +632,22 @@ impl XdgShellHandler for CdeCompositorState {
         println!("New application window mapping request intercepted!");
 
         // Tell the application interior surface to draw at 700x500
+        let (mut client_w, mut client_h) = (700, 500);
+
+        smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+            let mut guard = states
+                .cached_state
+                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+            let current = guard.current();
+            if current.min_size.w > 0 && current.min_size.h > 0 {
+                client_w = current.min_size.w;
+                client_h = current.min_size.h;
+            }
+        });
+
+
         toplevel.with_pending_state(|state| {
-            state.size = Some((700, 500).into());
+            state.size = Some((client_w, client_h).into());
         });
         // Send the standard protocol configure trigger event straight down to the client
         // This instructs the application that it is permitted to draw surfaces inside the compositor.
@@ -462,12 +657,11 @@ impl XdgShellHandler for CdeCompositorState {
         let surface = toplevel.wl_surface().clone();
 
         // Generate a simple unique sequential ID
-        static WINDOW_ID_ALLOCATOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-        let id = WINDOW_ID_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = next_surface_id();
 
         // Factor the frame decorations into the window's total tracking size
-        let overall_width = 700.0 + (CDE_BORDER_WIDTH * 2.0);
-        let overall_height = 500.0 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
+        let overall_width = client_w as f32 + (CDE_BORDER_WIDTH * 2.0);
+        let overall_height = client_h as f32 + CDE_BORDER_WIDTH + CDE_TITLEBAR_HEIGHT;
 
         // TODO(): Split cascade coordinate cal into own helper.
         // Calculate current raw coordinate offsets based on step indices
@@ -514,6 +708,8 @@ impl XdgShellHandler for CdeCompositorState {
             Some(surface),
             serial,
         );
+
+        self.sync_pager_windows();
     }
 
     fn toplevel_destroyed(&mut self, toplevel: ToplevelSurface) {
@@ -530,6 +726,7 @@ impl XdgShellHandler for CdeCompositorState {
                 "XDG Shell: Safely evicting decoupled Window context ID: {}",
                 dead_window.id
             );
+            self.pager_protocol_state.notify_window_removed(dead_window.id);
 
             // Explicitly clean out its texture allocation records inside Vulkan
             // now that the sockets are completely finalized on the OS layer
@@ -560,6 +757,8 @@ impl XdgShellHandler for CdeCompositorState {
                 }
             }
         }
+
+        self.sync_pager_windows();
     }
 
     fn reposition_request(
@@ -641,6 +840,52 @@ pub struct ClientState {
 }
 impl wayland_server::backend::ClientData for ClientState {}
 
+impl WlrLayerShellHandler for CdeCompositorState {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: LayerSurface,
+        _output: Option<WlOutput>,
+        layer: Layer,
+        namespace: String,
+    ) {
+        let id = next_surface_id();
+        surface.with_pending_state(|state| {
+            if state.size.is_none() {
+                state.size = Some((160, 120).into());
+            }
+        });
+        surface.send_configure();
+
+        self.layer_surfaces.push(LayerContext {
+            id,
+            surface,
+            layer,
+            namespace,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
+    }
+
+    fn layer_destroyed(&mut self, surface: LayerSurface) {
+        if let Some(idx) = self
+            .layer_surfaces
+            .iter()
+            .position(|l| l.surface.wl_surface() == surface.wl_surface())
+        {
+            let dead = self.layer_surfaces.remove(idx);
+            self.vulkan_engine.window_textures.lock().unwrap().remove(&dead.id);
+        }
+    }
+
+    fn ack_configure(&mut self, _surface: WlSurface, _configure: LayerSurfaceConfigure) {}
+}
+
 fn verify_current_user_inline_secure(secure_password: &SecretBox<Vec<u8>>) -> bool {
     let username = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
     let raw_pwd_bytes = secure_password.expose_secret();
@@ -686,6 +931,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Register global protocols into our Wayland socket
+    let layer_shell_state = WlrLayerShellState::new::<CdeCompositorState>(&display_handle);
+    let pager_protocol_state = PagerProtocolState::new(&display_handle);
     let compositor_state = CompositorState::new::<CdeCompositorState>(&display_handle);
     let xdg_shell_state = XdgShellState::new::<CdeCompositorState>(&display_handle);
     let xdg_decoration_state = XdgDecorationState::new::<CdeCompositorState>(&display_handle);
@@ -1050,9 +1297,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                         let button_state = event.state();
+                        let mx = state.pointer_location.0 as f32;
+                        let my = state.pointer_location.1 as f32;
 
+                        if state.current_grab == GrabState::PickingWindow {
+                            if button_state == ButtonState::Pressed {
+                                state.inspect_window_at(mx, my);
+                                state.current_grab = GrabState::Idle;
+                            }
+                            return;
+                        }
+
+                        // Check if the click is inside an external Layer Shell surface FIRST
+                        let hit_layer = state
+                            .layer_surfaces
+                            .iter()
+                            .rev()
+                            .find(|l| {
+                                mx >= l.x
+                                    && mx <= (l.x + l.width)
+                                    && my >= l.y
+                                    && my <= (l.y + l.height)
+                            })
+                            .map(|l| (l.surface.wl_surface().clone(), l.x as f64, l.y as f64));
+
+                        let pointer = state.seat.get_pointer().unwrap();
+
+                        // Focus the layer surface via motion() BEFORE sending button()
+                        if let Some((ref target_surface, lx, ly)) = hit_layer {
+                            pointer.motion(
+                                state,
+                                Some((target_surface.clone(), (lx, ly).into())),
+                                &smithay::input::pointer::MotionEvent {
+                                    location: smithay::utils::Point::from((mx as f64, my as f64)),
+                                    serial,
+                                    time: event.time() as u32,
+                                },
+                            );
+                        }
+
+                        // Now send the button event once to the focused target
                         // Pass click configurations down to focus handlers
-                        state.seat.get_pointer().unwrap().button(
+                        pointer.button(
                             state,
                             &smithay::input::pointer::ButtonEvent {
                                 button: event.button_code(),
@@ -1061,10 +1347,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 time: event.time() as u32,
                             },
                         );
+                        pointer.frame(state);
 
-                        let mx = state.pointer_location.0 as f32;
-                        let my = state.pointer_location.1 as f32;
+                        if hit_layer.is_some() {
+                            return;
+                        }
 
+                        // Forward clicks inside external Layer Shell surfaces first
+                        // XXX delete?
+                        //if let Some(layer) = state.layer_surfaces.iter().rev().find(|l| {
+                        //    mx >= l.x && mx <= (l.x + l.width) && my >= l.y && my <= (l.y + l.height)
+                        //}) {
+                        //    let target_surface = layer.surface.wl_surface().clone();
+                        //    let local_pos = smithay::utils::Point::from((
+                        //        (mx - layer.x) as f64,
+                        //        (my - layer.y) as f64,
+                        //    ));
+                        //    let pointer = state.seat.get_pointer().unwrap();
+                        //    pointer.motion(
+                        //        state,
+                        //        Some((target_surface, (layer.x as f64, layer.y as f64).into())),
+                        //        &smithay::input::pointer::MotionEvent {
+                        //            location: local_pos,
+                        //            serial,
+                        //            time: event.time() as u32,
+                        //        },
+                        //    );
+                        //    pointer.button(
+                        //        state,
+                        //        &smithay::input::pointer::ButtonEvent {
+                        //            button: event.button_code(),
+                        //            state: button_state,
+                        //            serial,
+                        //            time: event.time() as u32,
+                        //        },
+                        //    );
+                        //    return;
+                        //}
+                        // Existing bare-desktop root canvas check
                         if button_state == ButtonState::Pressed {
                             if let Some(button) = event.button() {
                                 if state.active_menu.is_none() && state.personality.is_root_canvas(state, mx, my) {
@@ -1356,6 +1676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     // Desktop Grid Auto-Layout Engine Logic
                                                     //println!("Minimizing Window context sequence completed.");
                                                     println!("CDE Engine Command: Minimizing Window Context ID: {}", window.id);
+                                                    state.pager_protocol_state.notify_window_removed(window.id);
                                                     // Calculate the read-only immutable count metric FIRST
                                                     let minimized_count = state.open_windows
                                                         .iter()
@@ -1435,13 +1756,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Reset interactive state on release
                                     state.current_grab = GrabState::Idle;
 
+                                    // XXX so finished drags, resizes, and focus changes update the mini-window positions in fvwm-pager
+                                    state.sync_pager_windows();
+
                                     // TODO move into vk as GC helper.
                                     // Evict dead surface handles from GPU memory
                                     let mut active_textures = state.vulkan_engine.window_textures.lock().unwrap();
 
                                     // Retain only texture cache models whose companion window IDs are still physically open
                                     active_textures.retain(|&id, _| {
-                                        let is_still_alive = state.open_windows.iter().any(|w| w.id == id);
+                                        let is_still_alive = state.open_windows.iter().any(|w| w.id == id)
+                                            || state.layer_surfaces.iter().any(|l| l.id == id);
                                         if !is_still_alive {
                                             // Fallback cleanup step if window tracker vanished from main stack mid-frame
                                             println!("Evicting destroyed window ID allocation mapping from GPU VRAM: {}", id);
@@ -1576,6 +1901,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.password_length,
                     state.active_menu,
                     state.personality,
+                    &state.layer_surfaces,
                 );
                 winit_backend.bind().unwrap();
             }
@@ -1613,6 +1939,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         is_session_locked: false,
         password_length: 0,
         secure_password_buffer: SecretBox::new(Box::new(Vec::new())),
+        layer_shell_state: layer_shell_state,
+        pager_protocol_state: pager_protocol_state,
+        layer_surfaces: Vec::new(),
     };
 
     // Expose the local display server socket path so apps know how to talk to us
@@ -1644,6 +1973,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.password_length,
             state.active_menu,
             state.personality,
+            &state.layer_surfaces,
         );
 
         // Natively drain and parse incoming client data on the thread context directly!
