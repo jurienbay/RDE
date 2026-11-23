@@ -53,6 +53,9 @@ use fvwm_personality::FvwmPersonality;
 mod pager_protocol;
 use pager_protocol::PagerProtocolState;
 
+mod config;
+use config::{WmAction, WmConfig};
+
 // Add an active drag state tracker enum
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GrabState {
@@ -108,6 +111,7 @@ pub struct CdeCompositorState {
     pub layer_shell_state: WlrLayerShellState,
     pub layer_surfaces: Vec<LayerContext>,
     pub pager_protocol_state: PagerProtocolState,
+    pub config: WmConfig,
 }
 
 impl CdeCompositorState {
@@ -144,16 +148,67 @@ impl CdeCompositorState {
         })
     }
 
+    pub fn execute_action(&mut self, action: &WmAction, socket_name: &str) {
+        match action {
+            WmAction::Exec(cmd) => {
+                println!("Config Action: Exec `{}`", cmd);
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .env("WAYLAND_DISPLAY", socket_name)
+                    .spawn();
+            }
+            WmAction::Module(module_name) => {
+                println!("Config Action: Spawning module `{}`", module_name);
+                // Resolve sibling binary next to cde_compositor (e.g. target/debug/fvwm-pager)
+                let bin_path = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|dir| dir.join(module_name)))
+                    .filter(|p| p.exists())
+                    .unwrap_or_else(|| std::path::PathBuf::from(module_name));
+
+                let _ = std::process::Command::new(bin_path)
+                    .env("WAYLAND_DISPLAY", socket_name)
+                    .spawn();
+            }
+            WmAction::TogglePersonality => {
+                self.toggle_personality();
+            }
+            WmAction::LockSession => {
+                if !self.is_session_locked {
+                    println!("Config Action: Locking session.");
+                    self.is_session_locked = true;
+                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                    self.seat.get_keyboard().unwrap().set_focus(self, None, serial);
+                }
+            }
+            WmAction::SwitchWorkspace(ws) => {
+                if *ws < 4 && self.active_workspace != *ws {
+                    self.active_workspace = *ws;
+                    self.pager_protocol_state.notify_workspace_changed(*ws);
+                }
+            }
+            WmAction::Nop => {}
+        }
+    }
+
     pub fn open_root_apps_menu(&mut self, mx: f32, my: f32) {
+        let mut row_labels = [[0u32; 8]; 4];
+        let count = self.config.root_menu.len().min(4);
+        for (i, entry) in self.config.root_menu.iter().take(4).enumerate() {
+            row_labels[i] = ActiveMenu::encode_label(&entry.label);
+        }
+        let item_count = count.max(1) as u32;
+
         self.active_menu = Some(ActiveMenu {
             kind: MenuKind::RootApps,
             window_id: 0,
             x: mx,
             y: my,
             width: 120.0,
-            height: (CDE_MENU_ROW_HEIGHT * 4.0) + 4.0,
-            item_count: 4,
-            row_labels: [[0u32; 8]; 4],
+            height: (CDE_MENU_ROW_HEIGHT * item_count as f32) + 4.0,
+            item_count,
+            row_labels,
             row_window_ids: [0u32; 4],
         });
     }
@@ -910,7 +965,12 @@ fn verify_current_user_inline_secure(secure_password: &SecretBox<Vec<u8>>) -> bo
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let is_nested = args.contains(&"--nested".to_string());
-    let personality: &'static dyn DesktopPersonality = if args.contains(&"--fvwm".to_string()) {
+    let config = WmConfig::load();
+
+    let use_fvwm = args.contains(&"--fvwm".to_string())
+        || (!args.contains(&"--cde".to_string()) && config.default_personality == "FVWM");
+
+    let personality: &'static dyn DesktopPersonality = if use_fvwm {
         &FvwmPersonality
     } else {
         &CdePersonality
@@ -1942,6 +2002,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         layer_shell_state: layer_shell_state,
         pager_protocol_state: pager_protocol_state,
         layer_surfaces: Vec::new(),
+        config,
     };
 
     // Expose the local display server socket path so apps know how to talk to us
@@ -1952,6 +2013,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CDE Wayland Compositor online! Listening on socket: {:?}",
         socket_name
     );
+
+    let startup_modules = state.config.startup_modules.clone();
+    for module in &startup_modules {
+        state.execute_action(&WmAction::Module(module.clone()), &socket_name);
+    }
 
     let mut display = display;
     // Keep Event Loop Alive while consistently flushing display pipelines :/

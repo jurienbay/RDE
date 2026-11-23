@@ -1,0 +1,23 @@
+# Desktop personality ("CDE" or "FVWM")
+Personality FVWM
+
+# Workspace & behavior settings
+DeskTopSize 2x2
+EdgeResistance 350
+FocusStyle SloppyFocus
+
+# Custom Root Menu entries: AddToMenu <MenuName> "<Label>" <Action> [Arg]
+AddToMenu RootMenu "Terminal" Exec foot
+AddToMenu RootMenu "Files" Exec pcmanfm
+AddToMenu RootMenu "Ident" Exec fvwm-ident
+AddToMenu RootMenu "Lock" LockSession
+
+# Custom Keybindings: Key <KeyName> <Context> <Modifiers> <Action> [Arg]
+Key M A CM TogglePersonality
+Key K A CM LockSession
+Key Return A M Exec foot
+
+# Auto-start modules when entering FVWM mode
+AddToFunc StartFunction
++ I Module fvwm-pager
++ I Module fvwm-buttons

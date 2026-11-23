@@ -17,6 +17,8 @@ impl DesktopPersonality for FvwmPersonality {
     }
 
     fn on_pointer_hover(&self, state: &mut CdeCompositorState, mx: f32, my: f32) {
+        if !state.config.sloppy_focus { return; }
+
         // Sloppy Focus: focus topmost window under cursor without raising it
         if let Some(hovered) = state.open_windows.iter().rev().find(|w| {
             w.workspace == state.active_workspace
@@ -36,7 +38,7 @@ impl DesktopPersonality for FvwmPersonality {
         // Edge Panning: Flip across the 2x2 workspace grid when hitting screen edges
         let can_pan = state
             .last_edge_pan
-            .map_or(true, |t| t.elapsed().as_millis() > FVWM_EDGE_PAN_COOLDOWN_MS);
+            .map_or(true, |t| t.elapsed().as_millis() > state.config.edge_pan_cooldown_ms);
         if !can_pan {
             return;
         }
