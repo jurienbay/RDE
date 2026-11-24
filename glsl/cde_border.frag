@@ -131,6 +131,51 @@ bool draw_cde_ascii_glyph(uint ascii, float x, float y) {
         if ((iy == 0 || iy == 3) && ix < 4) return true;
         if (ix == 4 && iy > 0 && iy < 3) return true;
     }
+    // Letter 'D' (ASCII 68)
+    if (ascii == 68u) {
+        if (ix == 0) return true;
+        if ((iy == 0 || iy == 6) && ix < 4) return true;
+        if (ix == 4 && iy > 0 && iy < 6) return true;
+    }
+    // Letter 'G' (ASCII 71)
+    if (ascii == 71u) {
+        if (ix == 0 && iy > 0 && iy < 6) return true;
+        if ((iy == 0 || iy == 6) && ix > 0 && ix < 4) return true;
+        if (ix == 4 && (iy == 1 || iy >= 3 && iy < 6)) return true;
+        if (iy == 3 && ix >= 2) return true;
+    }
+    // Letter 'H' (ASCII 72)
+    if (ascii == 72u) {
+        if (ix == 0 || ix == 4) return true;
+        if (iy == 3) return true;
+    }
+    // Letter 'K' (ASCII 75)
+    if (ascii == 75u) {
+        if (ix == 0) return true;
+        if (ix + iy == 4 && iy <= 3) return true;
+        if (iy - ix == 2 && iy >= 3) return true;
+    }
+    // Letter 'U' (ASCII 85)
+    if (ascii == 85u) {
+        if ((ix == 0 || ix == 4) && iy < 6) return true;
+        if (iy == 6 && ix > 0 && ix < 4) return true;
+    }
+    // Letter 'V' (ASCII 86)
+    if (ascii == 86u) {
+        if ((ix == 0 || ix == 4) && iy < 5) return true;
+        if (iy == 5 && (ix == 1 || ix == 3)) return true;
+        if (iy == 6 && ix == 2) return true;
+    }
+    // Letter 'X' (ASCII 88)
+    if (ascii == 88u) {
+        if (ix == iy || (ix + iy == 4)) return true;
+    }
+    // Letter 'Y' (ASCII 89)
+    if (ascii == 89u) {
+        if ((ix == 0 || ix == 4) && iy < 3) return true;
+        if (ix == 2 && iy >= 2) return true;
+        if (iy == 2 && (ix == 1 || ix == 3)) return true;
+    }
     // Letter '*' (ASCII 42) - Compact 5x5 centered cross/star representation
     if (ascii == 42u) {
         if (ix == 2 || iy == 3) { if (ix >= 1 && ix <= 3 && iy >= 2 && iy <= 4) return true; }
