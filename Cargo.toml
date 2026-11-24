@@ -4,11 +4,27 @@ version = "0.1.0"
 edition = "2024"
 license = "BSD3"
 description = "Reasonable Desktop Enviroment is a CDE-lookalike Wayland compositor"
+default-run = "RDE"
+
+[[bin]]
+name = "fvwm-pager"
+path = "src/bin/fvwm_pager.rs"
+
+[[bin]]
+name = "fvwm-buttons"
+path = "src/bin/fvwm_buttons.rs"
+
+[[bin]]
+name = "fvwm-ident"
+path = "src/bin/fvwm_ident.rs"
 
 [dependencies]
+smithay-client-toolkit = "0.21"
+wayland-client = "0.31"
+wayland-scanner = "0.31"
+
 smithay = { version = "0.7", features = ["backend_winit", "wayland_frontend"] }
 wayland-server = "0.31"
-wayland-scanner = "0.31"
 #calloop = "0.12"
 raw-window-handle = "0.6"
 xkbcommon = "0.9"

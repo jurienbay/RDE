@@ -6,6 +6,7 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=glsl/cde_border.vert");
     println!("cargo:rerun-if-changed=glsl/cde_border.frag");
+    println!("cargo:rerun-if-changed=protocols/fvwm_pager_v1.xml");
 
     let compiler = shaderc::Compiler::new().expect("Failed to initialize shaderc compiler");
     let mut options = shaderc::CompileOptions::new().expect("Failed to initialize compile options");
