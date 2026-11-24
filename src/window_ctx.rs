@@ -24,6 +24,8 @@ pub enum MenuKind {
     WindowList,
 }
 
+pub const MAX_MENU_ITEMS: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ActiveMenu {
     pub kind: MenuKind,
@@ -33,8 +35,8 @@ pub struct ActiveMenu {
     pub width: f32,
     pub height: f32,
     pub item_count: u32,
-    pub row_labels: [[u32; 8]; 4], // Up to 4 rows, 8 ASCII chars each
-    pub row_window_ids: [u32; 4],  // Maps each row to a target window ID for WindowList
+    pub row_labels: [[u32; 8]; MAX_MENU_ITEMS], // Up to [MAX_MENU_ITEMS] rows, 8 ASCII chars each
+    pub row_window_ids: [u32; MAX_MENU_ITEMS],  // Maps each row to a target window ID for WindowList
 }
 
 // Structural context representing a single floating CDE application window

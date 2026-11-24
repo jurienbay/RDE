@@ -193,9 +193,9 @@ impl CdeCompositorState {
     }
 
     pub fn open_root_apps_menu(&mut self, mx: f32, my: f32) {
-        let mut row_labels = [[0u32; 8]; 4];
-        let count = self.config.root_menu.len().min(4);
-        for (i, entry) in self.config.root_menu.iter().take(4).enumerate() {
+        let mut row_labels = [[0u32; 8]; MAX_MENU_ITEMS];
+        let count = self.config.root_menu.len().min(MAX_MENU_ITEMS);
+        for (i, entry) in self.config.root_menu.iter().take(MAX_MENU_ITEMS).enumerate() {
             row_labels[i] = ActiveMenu::encode_label(&entry.label);
         }
         let item_count = count.max(1) as u32;
@@ -209,16 +209,16 @@ impl CdeCompositorState {
             height: (CDE_MENU_ROW_HEIGHT * item_count as f32) + 4.0,
             item_count,
             row_labels,
-            row_window_ids: [0u32; 4],
+            row_window_ids: [0u32; MAX_MENU_ITEMS],
         });
     }
 
     pub fn open_window_list_menu(&mut self, mx: f32, my: f32) {
-        let mut row_labels = [[0u32; 8]; 4];
-        let mut row_window_ids = [0u32; 4];
-        let count = self.open_windows.len().min(4);
+        let mut row_labels = [[0u32; 8]; MAX_MENU_ITEMS];
+        let mut row_window_ids = [0u32; MAX_MENU_ITEMS];
+        let count = self.open_windows.len().min(MAX_MENU_ITEMS);
 
-        for (i, win) in self.open_windows.iter().take(4).enumerate() {
+        for (i, win) in self.open_windows.iter().take(MAX_MENU_ITEMS).enumerate() {
             row_window_ids[i] = win.id;
             row_labels[i] = ActiveMenu::encode_label(&format!("WIN{}", win.id));
         }
@@ -1772,8 +1772,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         width: menu_w,
                                                         height: menu_h,
                                                         item_count: 4,
-                                                        row_labels: [[0u32; 8]; 4],
-                                                        row_window_ids: [0u32; 4],
+                                                        row_labels: [[0u32; 8]; MAX_MENU_ITEMS],
+                                                        row_window_ids: [0u32; MAX_MENU_ITEMS],
                                                     });
                                                 }
                                                 _ => {}
@@ -1806,8 +1806,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     width: menu_w,
                                                     height: menu_h,
                                                     item_count: 4,
-                                                    row_labels: [[0u32; 8]; 4],
-                                                    row_window_ids: [0u32; 4],
+                                                    row_labels: [[0u32; 8]; MAX_MENU_ITEMS],
+                                                    row_window_ids: [0u32; MAX_MENU_ITEMS],
                                                 });
                                             }
                                         }
