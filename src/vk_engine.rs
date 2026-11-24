@@ -907,9 +907,14 @@ impl VulkanEngine {
 
                 // Pack up to 4 rows x 4 chars (16 u32s) into title_chars so the shader renders all 4 labels in 1 draw call!
                 let mut packed_chars = [0u32; 16];
-                for r in 0..4 {
-                    for c in 0..4 {
-                        packed_chars[(r * 4) + c] = menu.row_labels[r][c];
+                for (r, row) in menu.row_labels.iter().enumerate() {
+                    for (chunk_idx, chunk) in row.chunks(4).enumerate() {
+                        packed_chars[(r * 2) + chunk_idx] = u32::from_le_bytes([
+                            chunk.first().copied().unwrap_or(0) as u8,
+                            chunk.get(1).copied().unwrap_or(0) as u8,
+                            chunk.get(2).copied().unwrap_or(0) as u8,
+                            chunk.get(3).copied().unwrap_or(0) as u8,
+                        ]);
                     }
                 }
 

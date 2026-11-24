@@ -1135,40 +1135,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     use smithay::backend::input::KeyboardKeyEvent;
 
                     if key_event.state() == KeyState::Pressed {
-                        let key_code = key_event.key_code();
+                        let raw_code: u32 = key_event.key_code().into();
                         let modifiers = state.seat.get_keyboard().unwrap().modifier_state();
 
-                        /// When X11 was originally written, the developers needed to isolate
-                        /// software applications from varying hardware protocols. To do this,
-                        /// Xorg enforced an arbitrary rule: take the raw hardware/kernel
-                        /// keycode and add exactly 8 to it.
-                        const X11_KKEY: u32 = 37u32 + 8u32;
+                        // Backdoor unlock (Ctrl + Alt + U) when locked
                         const X11_UKEY: u32 = 22u32 + 8u32;
-                        const X11_MKEY: u32 = 50u32 + 8u32;
+                        if state.is_session_locked
+                            && modifiers.ctrl
+                            && modifiers.alt
+                            && raw_code == X11_UKEY
+                        {
+                            println!("🔓 Backdoor Hotkey Activated: Restoring session.");
+                            state.is_session_locked = false;
+                            return;
+                        }
 
-                        if modifiers.ctrl && modifiers.alt {
-                            println!("Hotkey Activated: Ctrl+Alt pressed. {:?}", key_code);
-                            if key_code == smithay::backend::input::Keycode::from(X11_MKEY) && !state.is_session_locked {
-                                state.toggle_personality();
-                                return; // Absorb hotkey so it doesn't type 'm' into the focused terminal
-                            }
-                            // Ctrl + Alt + K -> LOCK SESSIONS (Changed to avoid WM conflicts)
-                            if key_code == smithay::backend::input::Keycode::from(X11_KKEY) && !state.is_session_locked {
-                                println!("🔒 Hotkey Activated: Super+L triggered! Locking compositor session.");
-                                state.is_session_locked = true;
-                                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                                state.seat.get_keyboard().unwrap().set_focus(state, None, serial);
-                                return; // Absorb event
-                            }
-                            // Ctrl + Alt + U -> UNLOCK SEED FOR BACKDOOR TESTING (Scan code 22_u32)
-                            if key_code == smithay::backend::input::Keycode::from(X11_UKEY) && state.is_session_locked {
-                                println!("🔓 Backdoor Hotkey Activated: Super+Shift+U triggered! Restoring session.");
-                                state.is_session_locked = false;
-                                return; // Absorb event
+                        if !state.is_session_locked {
+                            let matched_action = state
+                                .config
+                                .keybindings
+                                .iter()
+                                .find(|kb| {
+                                    kb.x11_keycode == raw_code
+                                        && kb.require_ctrl == modifiers.ctrl
+                                        && kb.require_alt == modifiers.alt
+                                        && (!kb.require_super || modifiers.logo)
+                                })
+                                .map(|kb| kb.action.clone());
+
+                            if let Some(action) = matched_action {
+                                state.execute_action(&action, &closure_socket_name);
+                                return;
                             }
                         }
                     }
                 }
+
                 // ----------------===========================================
                 // SECURE INPUT ROUTING barrier IF LOCKED
                 // ------------------------------------------------===========
@@ -1473,29 +1475,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                             match menu.kind {
                                                 MenuKind::RootApps => {
-                                                    // Workspace Root Menu Selection Actions
-                                                    match clicked_row {
-                                                        CDE_ROOT_MENU_ITEM_TERMINAL => {
-                                                            println!("CDE Root Menu: Spawning Terminal Console.");
-                                                            std::process::Command::new("foot")
-                                                                .env("WAYLAND_DISPLAY", &closure_socket_name)
-                                                                .spawn().expect("Failed to execute client process");
-                                                        }
-                                                        CDE_ROOT_MENU_ITEM_FILEMGR => {
-                                                            println!("CDE Root Menu: Spawning File Manager.");
-                                                            std::process::Command::new("pcmanfm")
-                                                                .env("WAYLAND_DISPLAY", &closure_socket_name)
-                                                                .spawn().expect("Failed to execute client process");
-                                                        }
-                                                        CDE_ROOT_MENU_ITEM_LOCK => {
-                                                            if !state.is_session_locked {
-                                                                println!("CDE Root Menu: Locking session.");
-                                                                state.is_session_locked = true;
-                                                                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                                                                state.seat.get_keyboard().unwrap().set_focus(state, None, serial);
-                                                            }
-                                                        }
-                                                        _ => {} // Cancel row simply dismisses the popup window panel
+                                                    if let Some(action) = state
+                                                        .config
+                                                        .root_menu
+                                                        .get(clicked_row as usize)
+                                                        .map(|entry| entry.action.clone())
+                                                    {
+                                                        state.execute_action(&action, &closure_socket_name);
                                                     }
                                                 }
                                                 MenuKind::WindowList => {

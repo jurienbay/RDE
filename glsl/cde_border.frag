@@ -27,12 +27,6 @@ const float BEVEL_THICKNESS = 4.0;
 const float BORDER_WIDTH = 6.0;
 const float TITLEBAR_HEIGHT = 22.0;
 
-// RootMenu labels
-const uint CDE_LABEL_TERMINAL[8] = uint[](84u, 69u, 82u, 77u, 73u, 78u, 65u, 76u); // T,E,R,M,I,N,A,L
-const uint CDE_LABEL_FILEMGR[8]  = uint[](70u, 73u, 76u, 69u, 32u, 77u, 71u, 82u); // F,I,L,E, ,M,G,R
-const uint CDE_LABEL_LOCKSCREEN[8]= uint[](76u, 79u, 67u, 75u, 32u, 83u, 67u, 82u); // L,O,C,K, ,S,C,R
-const uint CDE_LABEL_CANCEL[6]   = uint[](67u, 65u, 78u, 67u, 69u, 76u);         // C,A,N,C,E,L
-
 // ActiveMenu labels
 const uint CDE_LABEL_RESTORE[7]  = uint[](82u, 69u, 83u, 84u, 79u, 82u, 69u); // R,E,S,T,O,R,E
 const uint CDE_LABEL_MINIMIZE[8] = uint[](77u, 73u, 78u, 73u, 77u, 73u, 90u, 69u); // M,I,N,I,M,I,Z,E
@@ -568,16 +562,13 @@ void main() {
 	            uint char_idx = uint(floor(text_local_x / 6.0));
 	            uint current_ascii = 0u;
 
-	            if (push.is_pressed == 1u) {
-	                // RootApps menu
-	                if (row_index == 0.0 && char_idx < 8u) current_ascii = CDE_LABEL_TERMINAL[char_idx];
-	                else if (row_index == 1.0 && char_idx < 8u) current_ascii = CDE_LABEL_FILEMGR[char_idx];
-	                else if (row_index == 2.0 && char_idx < 8u) current_ascii = CDE_LABEL_LOCKSCREEN[char_idx];
-	                else if (row_index == 3.0 && char_idx < 6u) current_ascii = CDE_LABEL_CANCEL[char_idx];
-	            } else if (push.is_pressed == 2u) {
-	                // WindowList menu (packed 4 chars per row in title_chars)
-	                if (char_idx < 4u) {
-	                    current_ascii = push.title_chars[(uint(row_index) * 4u) + char_idx];
+	            uint safe_row = uint(clamp(row_index, 0.0, max_rows - 1.0));
+	            if (push.is_pressed == 1u || push.is_pressed == 2u) {
+	                // Both RootApps (config-driven) and WindowList pack 4 chars per row in title_chars
+	                if (char_idx < 8u && safe_row < 8u) {
+	                    uint word_idx = (safe_row * 2u) + (char_idx / 4u);
+	                    uint byte_shift = (char_idx % 4u) * 8u;
+	                    current_ascii = (push.title_chars[word_idx] >> byte_shift) & 0xFFu;
 	                }
 	            } else {
 	                // WindowOps menu
