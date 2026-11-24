@@ -115,14 +115,17 @@ pub struct CdeCompositorState {
 }
 
 impl CdeCompositorState {
-    pub fn has_external_pager(&self) -> bool {
-        self.layer_surfaces.iter().any(|l| l.namespace == "fvwm-pager")
+    pub fn ensure_fvwm_pager(&mut self, socket_name: &str) {
+        if !self.layer_surfaces.iter().any(|l| l.namespace == "fvwm-pager") {
+            self.execute_action(&WmAction::Module("fvwm-pager".to_string()), socket_name);
+        }
     }
 
-    pub fn toggle_personality(&mut self) {
+    pub fn toggle_personality(&mut self, socket_name: &str) {
         self.active_menu = None;
         if self.personality.name() == "CDE" {
             self.personality = &FvwmPersonality;
+            self.ensure_fvwm_pager(socket_name);
         } else {
             self.personality = &CdePersonality;
             for win in &mut self.open_windows {
@@ -172,7 +175,7 @@ impl CdeCompositorState {
                     .spawn();
             }
             WmAction::TogglePersonality => {
-                self.toggle_personality();
+                self.toggle_personality(socket_name);
             }
             WmAction::LockSession => {
                 if !self.is_session_locked {
@@ -2000,8 +2003,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket_name
     );
 
+    if state.personality.name() == "FVWM" {
+        state.ensure_fvwm_pager(&socket_name);
+    }
     let startup_modules = state.config.startup_modules.clone();
     for module in &startup_modules {
+        if module == "fvwm-pager" && state.personality.name() == "FVWM" {
+            continue; // Already spawned above
+        }
         state.execute_action(&WmAction::Module(module.clone()), &socket_name);
     }
 

@@ -884,8 +884,7 @@ impl VulkanEngine {
             }
 
             // Render CDE front panel desktop dock
-            let has_external_pager = layer_surfaces.iter().any(|l| l.namespace == "fvwm-pager");
-            personality.render_chrome(self, cmd_buf, screen_w, screen_h, active_workspace, has_external_pager);
+            personality.render_chrome(self, cmd_buf, screen_w, screen_h, active_workspace);
 
             self.draw_layer_batch(
                 cmd_buf,

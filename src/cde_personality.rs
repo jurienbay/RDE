@@ -73,7 +73,6 @@ impl DesktopPersonality for CdePersonality {
         screen_w: f32,
         screen_h: f32,
         active_workspace: u32,
-        _has_external_pager: bool,
     ) {
         engine.draw_cde_front_panel(cmd_buf, screen_w, screen_h, active_workspace);
     }

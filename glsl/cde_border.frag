@@ -629,52 +629,6 @@ void main() {
 	}
 	/// XXX
 
-    // is_focused == 7 -> RENDER FVWM 2x2 VIRTUAL DESKTOP PAGER
-	if ((push.is_focused & 0xFu) == 7u) {
-	    uint active_desk_idx = push.is_focused >> 4u;
-	    float b = 2.0;
-
-	    // Outer sunken pager frame
-	    if (x < b || y < b) {
-	        outColor = CDE_SHADOW;
-	        return;
-	    }
-	    if (x > (w - b) || y > (h - b)) {
-	        outColor = CDE_HIGHLIGHT;
-	        return;
-	    }
-
-	    float inner_w = w - (b * 2.0);
-	    float inner_h = h - (b * 2.0);
-	    float col_w = inner_w / 2.0;
-	    float row_h = inner_h / 2.0;
-
-	    float lx = x - b;
-	    float ly = y - b;
-
-	    uint col_idx = min(uint(floor(lx / col_w)), 1u);
-	    uint row_idx = min(uint(floor(ly / row_h)), 1u);
-	    uint cell_idx = (row_idx * 2u) + col_idx;
-
-	    float cx = lx - (float(col_idx) * col_w);
-	    float cy = ly - (float(row_idx) * row_h);
-
-	    // 1px dashed/solid grid dividers between virtual pages
-	    if (cx < 1.0 || cy < 1.0) {
-	        outColor = CDE_ETCH_BLACK;
-	        return;
-	    }
-
-	    // Highlight active FVWM page vs inactive dark slate pages
-	    if (cell_idx == active_desk_idx) {
-	        outColor = vec4(0.29, 0.43, 0.65, 1.0); // Active page highlight
-	    } else {
-	        outColor = vec4(0.32, 0.34, 0.38, 1.0); // Inactive FVWM pager desk
-	    }
-	    return;
-	}
-// XXX
-
 	// Thin outer black etch line (Highest priority on extreme edges)
         if (x < 1.0 || y < 1.0 || x >= (w - 1.0) || y >= (h - 1.0)) {
             outColor = CDE_ETCH_BLACK;

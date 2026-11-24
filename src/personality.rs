@@ -51,6 +51,5 @@ pub trait DesktopPersonality {
         screen_w: f32,
         screen_h: f32,
         active_workspace: u32,
-        has_external_pager: bool,
     );
 }

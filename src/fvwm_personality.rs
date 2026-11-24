@@ -60,18 +60,6 @@ impl DesktopPersonality for FvwmPersonality {
     }
 
     fn is_root_canvas(&self, state: &CdeCompositorState, mx: f32, my: f32) -> bool {
-        if !state.has_external_pager() {
-            let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
-            let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
-            let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
-            let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
-
-            if mx >= pager_x && mx <= pager_x + FVWM_PAGER_WIDTH
-                && my >= pager_y && my <= pager_y + FVWM_PAGER_HEIGHT
-            {
-                return false;
-            }
-        }
         !state.hits_any_window(mx, my)
     }
 
@@ -85,27 +73,11 @@ impl DesktopPersonality for FvwmPersonality {
 
     fn on_chrome_click(
         &self,
-        state: &mut CdeCompositorState,
-        mx: f32,
-        my: f32,
+        _state: &mut CdeCompositorState,
+        _mx: f32,
+        _my: f32,
         _socket_name: &str,
     ) -> bool {
-        if state.has_external_pager() {
-            return false;
-        }
-        let screen_w = state.vulkan_engine.swapchain_extent.width as f32;
-        let screen_h = state.vulkan_engine.swapchain_extent.height as f32;
-        let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
-        let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
-
-        if mx >= pager_x && mx <= pager_x + FVWM_PAGER_WIDTH
-            && my >= pager_y && my <= pager_y + FVWM_PAGER_HEIGHT
-        {
-            let col = (((mx - pager_x) / (FVWM_PAGER_WIDTH / 2.0)).floor() as u32).clamp(0, 1);
-            let row = (((my - pager_y) / (FVWM_PAGER_HEIGHT / 2.0)).floor() as u32).clamp(0, 1);
-            state.active_workspace = (row * 2) + col;
-            return true;
-        }
         false
     }
 
@@ -117,24 +89,12 @@ impl DesktopPersonality for FvwmPersonality {
 
     fn render_chrome(
         &self,
-        engine: &VulkanEngine,
-        cmd_buf: vk::CommandBuffer,
-        screen_w: f32,
-        screen_h: f32,
-        active_workspace: u32,
-        has_external_pager: bool,
+        _engine: &VulkanEngine,
+        _cmd_buf: vk::CommandBuffer,
+        _screen_w: f32,
+        _screen_h: f32,
+        _active_workspace: u32,
     ) {
-        if has_external_pager {
-            return;
-        }
-        let pager_x = screen_w - FVWM_PAGER_WIDTH - 12.0;
-        let pager_y = screen_h - FVWM_PAGER_HEIGHT - 12.0;
-        engine.draw_procedural_ui_element(
-            cmd_buf,
-            screen_h,
-            screen_w,
-            (pager_x, pager_y, FVWM_PAGER_WIDTH, FVWM_PAGER_HEIGHT),
-            7u32 | (active_workspace << 4),
-        );
+        // Rendered externally by the fvwm-pager layer-shell module
     }
 }
